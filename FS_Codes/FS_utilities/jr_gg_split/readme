@@ -1,0 +1,24 @@
+This is a code by Jens Roessiger. The following information is from his PhD thesis:
+
+jr_gg_split –u 1 2 3 4 5 6
+
+1.
+    Splitmode (int 1, 2, 3)
+    Splitmode 1: all grains have the same split chance
+    Splitmode 2: every grain > min_area have the same chance to split.
+    Splitmode 3: chance increasing. From < min_area = 0% to > max_area = 100%
+2. 
+    Splitchance (double between 0 and 1)
+3. 
+    Random forward (int): does a given number of random calls before the value is actually used.
+    Further randomizes the simulation.
+4.
+    Starting step (int): In case of a restart. Influences the file numbering. This way a restart can be
+    done in the same directory without overwriting files.
+5. 
+    Min_area (double): used by Splitmode 2 and 3
+6. 
+    Max_area (double): used by Splitmode 3
+
+
+This code can be used with an existing Elle file to create a set of very small, but many, flynns. Using elle_gg on this set allows the user to achieve any desired initial grain size in a foam texture.

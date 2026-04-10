@@ -1,0 +1,25 @@
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+#include "extra.rules"
+
+#define IHaveSubdirs
+#define PassCDebugFlags CDEBUGFLAGS="$(CDEBUGFLAGS)" CXXDEBUGFLAGS="$(CDEBUGFLAGS)"
+
+SUBDIRS = statscode basecode utilities processes
+SUBDIRS_BASE = basecode utilities 
+SUBDIRS_B = basecode utilities processes
+SUBDIRS_X = basecode utilities processes
+SUBDIRS_WX = basecode utilities processes
+
+NamedTargetSubdirs(install_base,$(SUBDIRS_BASE),"installing base",NullParameter,install_base)
+MakeBatchSubdirs($(SUBDIRS_B))
+NamedTargetSubdirs(install_b,$(SUBDIRS_B),"installing batch",NullParameter,install_b)
+MakeDisplayWXSubdirs($(SUBDIRS_WX))
+NamedTargetSubdirs(install_wx,$(SUBDIRS_WX),"installing display_wx",NullParameter,install_wx)
+MakeDisplayXSubdirs($(SUBDIRS_X))
+NamedTargetSubdirs(install_x,$(SUBDIRS_X),"installing display_x",NullParameter,install_x)
+DependSubdirs($(SUBDIRS))
+CleanMakefile()
+CleanmkSubdirs($(SUBDIRS))

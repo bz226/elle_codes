@@ -1,0 +1,25 @@
+FS_gg_potts
+
+FS_gg_potts -i input.elle -u Input1 Input2 Input3 -s Stages -f SaveFrequency -n
+
+This is a potts model for grain growth. 
+Probability function:
+
+    if dE > 0:      Pflip = P0 * exp (-c dE / k T) 
+    if dE <= 0:     Pflip = P0      
+
+T - Temperature 
+    Set in Elle file
+k - Boltzman constant
+dE - Energy difference between two states, calculated in code
+           
+Other values are input parameters:
+    
+P0 - Input 1, if you set Input1=0 P0 will be 0.1
+c  - Input 2, sensitivity factor, if set to Input2=0 c will be the Boltzman constant
+Input 3: Set to 1 to switch off randomisation, default: 0
+
+
+--> Store state of a point in U_ATTRIB_A, prepare the states using the MATLAB folder and the MATLAB_create_initial_states m-file
+
+

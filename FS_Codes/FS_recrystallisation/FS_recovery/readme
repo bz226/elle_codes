@@ -1,0 +1,19 @@
+This is the recovery code, previously called "serialSGG" in Gema Llorens' PhD thesis.
+
+This code is not much different to the "older" version, apart from:
+
+1. Possibility to exclude phases (e.g. air phase)
+2. Correction in Read-Shockley equation (FS_recovery.elle.cc line 802):
+        There was a division, but actually it should be a multiplication!!!
+
+Important: Keep the "symmetry.symm" file in the same folder from where you call the code!!
+
+Usage:
+
+FS_recovery -i file.elle -u A B C D E -n
+
+A. Set high angle grain boundary threshold angle in degrees, e.g. 15°
+B. Set ID of phase (flynn VISC.) which should be excluded (e.g. useful for air), set 0 for no exclusion
+C. Logscreen: Switch off random picking of flynns, unodes etc. by setting this to 1
+D. Set initial rotation mobility, 0 is default but will lead to NO rotation  Hint: should be viscosity in new recovery code, that scales rotation to timestep
+E. Set initial start step (steps already performed in input file), 0 is default. Only for output file naming.

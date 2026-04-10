@@ -1,0 +1,9 @@
+vs.07 fix cummulative offset and check DN and TN after set position. Needed to test if ElleCheckTripleJ(j) works fine..
+
+19/11/2008 vs.07.1 fix the ROI to 3, added a count variable with the average unodes picked to calculate displacement field. Executable is move_nodes_beta_ROI_test 
+
+23/11/2008 vs.08 Add a check_error routine after bnodes are moved. Use ATTRIB_A but need to change to ATTRIB_C, similar then used in gbm_unodes process. Executable is move_nodes_beta_8
+
+15/12/2008 version move_nodes_beta_8 is default version fft2elle
+
+20/02/09 user value to import automatically DDs data from tex.out file 

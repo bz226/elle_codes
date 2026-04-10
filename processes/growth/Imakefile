@@ -1,0 +1,41 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+GSRCS=  gg.main.cc gg.elle.cc
+GBESRCS=  gbe.main.cc gbe.elle.cc
+SRCS=  $(GSRCS) $(GBESRCS)
+GOBJS=  gg.main.o gg.elle.o
+GBEOBJS=  gbe.main.o gbe.elle.o
+THISAPPG= elle_gg
+THISAPPGBE= elle_gbe
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPPG),$(BTCHEXT),$(GOBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPPG),$(XEXT),$(GOBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPPG),$(WXEXT),$(GOBJS),$(BINDIRWX))
+
+
+MakeBatch($(THISAPPGBE),$(BTCHEXT),$(GBEOBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPPGBE),$(XEXT),$(GBEOBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPPGBE),$(WXEXT),$(GBEOBJS),$(BINDIRWX))
+
+CleanMakefile()

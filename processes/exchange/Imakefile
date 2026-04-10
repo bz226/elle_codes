@@ -1,0 +1,41 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+exSRCS=  exchange.main.cc exchange.elle.cc
+makeSRCS=  make_exchng.main.cc make_exchng.elle.cc
+SRCS=  $(exSRCS) $(makeSRCS)
+exOBJS=  exchange.main.o exchange.elle.o
+makeOBJS=  make_exchng.main.o make_exchng.elle.o
+THISAPPex= elle_exchange
+THISAPPmake= make_exchng
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+MakeBatch($(THISAPPex),$(BTCHEXT),$(exOBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPPex),$(XEXT),$(exOBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPPex),$(WXEXT),$(exOBJS),$(BINDIRWX))
+
+
+MakeBatch($(THISAPPmake),$(BTCHEXT),$(makeOBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPPmake),$(XEXT),$(makeOBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPPmake),$(WXEXT),$(makeOBJS),$(BINDIRWX))
+
+
+CleanMakefile()

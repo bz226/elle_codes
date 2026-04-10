@@ -1,0 +1,25 @@
+#define IHaveSubdirs
+#define PassCDebugFlags
+
+#include "../extra.rules"
+
+SUBDIRS = matrix gpc convert reposition checkangle view \
+ps movies tidy experiment_launcher lattestart shelle shifty plot_ugrid
+SUBDIRS_BASE = matrix gpc convert reposition checkangle ps \
+shifty plot_ugrid
+SUBDIRS_B = convert view tidy
+SUBDIRS_WX = convert checkangle reposition view movies tidy ps \
+experiment_launcher lattestart shelle shifty plot_ugrid
+SUBDIRS_X =  convert checkangle reposition view movies tidy ps
+
+MakeBaseSubdirs($(SUBDIRS_BASE))
+NamedTargetSubdirs(install_base,$(SUBDIRS_BASE),"installing base",NullParameter,install_base)
+MakeBatchSubdirs($(SUBDIRS_B))
+NamedTargetSubdirs(install_b,$(SUBDIRS_B),"installing batch",NullParameter,install_b)
+MakeDisplayWXSubdirs($(SUBDIRS_WX))
+NamedTargetSubdirs(install_wx,$(SUBDIRS_WX),"installing wx/gl display",NullParameter,install_wx)
+MakeDisplayXSubdirs($(SUBDIRS_X))
+NamedTargetSubdirs(install_x,$(SUBDIRS_X),"installing display_x",NullParameter,install_x)
+DependSubdirs($(SUBDIRS))
+CleanMakefile()
+CleanmkSubdirs($(SUBDIRS))

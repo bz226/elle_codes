@@ -1,0 +1,7 @@
+The idea of this grain boundary sliding approach is simply to set "boundary unodes" before running elle2fft. These unodes will be set to a 2nd phase which is the "boundary-phase" (isotropic and n-times softer than e.g. ice basal plane). 
+Afterwards, we will run elle2fft, the fft code itself and then:
+
+a) Run fft2elle and afterwards reset "boundary unodes" to real ice unodes
+b) Reset "boundary unodes" to real ice unodes and run fft2elle
+
+The user needs to decide on option a or b. Also, probably another routine is needed to reset boundary unodes to ice unodes than the one implemented right now.

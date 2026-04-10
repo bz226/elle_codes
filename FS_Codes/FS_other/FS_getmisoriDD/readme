@@ -1,0 +1,44 @@
+FS_getmisori -i filename.elle -u A B C -n
+
+A: High angle grain boundary angle
+B: Excluded phase (e.g. for air type phase ID=2), nothing will be done for this phase
+C: If set to 1, only misorientation, but not dislocation density is updated in output file, default: 0
+
+-> NOTE: You have to activate the flynn attribute MINERAL and set your flynns to compatible minerals such as ICE
+
+For each unode: Calculating the misorientation like it is done in FS_recovery, but using kernel average misorientation taking the averaged weighted with the neighbour unode separation 
+-> Misorientation is stored in U_ATTRIB_F
+
+Determining the dislocation density for this unode using a separate function. Comments:
+
+* Calculate dislocation density from kernel average misorientation.
+* 
+* --> IDEA: Ashby (1970), Borthwick et al. (2013): 
+* 
+* dd = theta / (burgersvec *x) 
+* 
+* where x is the distance over which the lattice bending of theta 
+* (misorientation) occurs double 
+* 
+* --> Problem: We cannot use the mean distance of the unode of interest to its 
+* neighbour unodes as x, because then the resulting dislocation density would 
+* be dependent on the resolution and lower with higher
+resolution --> INCORRECT!
+* 
+* --> Way out: We normalise the average distance from the unode of interest to 
+* all its neighbour unodes to the theoretical perimeter of the kernel. We 
+* actually only know the "volume" of the kernel in "number of unodes", which
+* is the number of neighbours + 1 (the unode of interest). We also know the
+* theoretical spacing of the regular square grid, which is the spacing of
+* two direct neighbour unodes. From that we can determine the theoretical kernel
+* perimeter:
+* 
+* Perimeter = (sqrt(number_of_neighbours+1)*4) * direct_nb; 
+* 
+* Where direct_nb is the grid spacing of unodes in a regular square grid of the 
+* given resolution. Using this approach we get a normalised distance which is 
+* 1st independent of the unode resolution and 2nd semi-independent of the number 
+* of neighbours used. Neighbours that are far away will still contribute less 
+* to the dislocation density.
+* In the end of course the resulting dislocation density needs to be scaled to
+* the unit length of the model 

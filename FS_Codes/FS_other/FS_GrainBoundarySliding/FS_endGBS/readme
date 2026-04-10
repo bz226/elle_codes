@@ -1,0 +1,16 @@
+This code resets boundary-phase unodes to regular phase unodes (e.g. ice phase).
+
+For each boundary-phase unode, the code detects the nearest non-boundary-unode in the flynn and sets its properties to the one of this unode. Alternatively, the user can choose to use the previous attributes of the boundary unodes stored in TempGBunodesProps.txt by FS_startGBS. This way, not the nearest unode properties, but its former properties are assigned to the boundary unode. 
+
+If no nearest unode in flynn is found: Properties are left as they are. This approach is probably not the most elegant. Especially when we consider how dislocation densities are described. Maybe it needs changing at some stage.
+
+ATTENTION: 
+1. Make sure to use FS_flynn2unode_attribute -i file.elle -u 1 -n after this: This is to make sure, that phase IDs are again correctly assigned.
+(Only works if phase indicator is U_VISCOSITY)
+2. Make sure to use FS_topocheck afterwards. The property defining in which flynn the unode sits is re-assigned too if using old (temporarily stored) properties, but unode may have changed flynns during deformation.
+
+USAGE:
+--> Use after repositioing (or directly after fft2elle, if no repositioning is needed (pure shear)).
+FS_endGBS -i file.elle -u A B -n
+A: Phase Id of boundary phase. Default = 2
+B: Use temporarily stored properties instead for searching for nearest unodes (set to 1 to switch on). Default = 0

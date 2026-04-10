@@ -1,0 +1,44 @@
+README IS FOR THE 3D VERSION WITHOUT ELLE
+
+FS_gg_potts3D Input1    Input2 Input3 Input4    Input5    Input6 Input7           Input8
+
+FS_gg_potts3D input.txt P0     c      T(°C)     Dimension Stages RandomisationOff StartStep             
+
+INFO ABOUT INPUT
+Dimension - Input 5: The number of points in each dimension
+Stages - Input 6: The number of stages to perform the model, each stage will be stored in separate output txt file
+RandomisationOff - Input 7: Points are accessed randomly, setting this to 1 switches the randomisation off
+StartStep - Input 8: The number of stages already performed in initial file, only necessary for naming output files
+ 
+Probability function:
+
+    if dE > 0:      Pflip = P0 * exp (-c dE / k T) 
+    if dE <= 0:     Pflip = P0      
+
+T - Temperature - at the moment set to -30 °C = 243 K (ice) 
+
+k - Boltzmann constant
+dE - Energy difference between two states, calculated in code
+             
+
+DEFAULT VALUES IF NO INPUT IS SET OR INPUT == 0
+
+P0 - Input 2: probability zero in probability function: 0.1
+c  - Input 3: sensitivity factor c: Boltzman constant
+T  - Input 4: temperature in °C: -30°C is default
+Dimension - Input 5: The number of points in each dimension: 32
+    --> Dimension must match the dimension of points in input file!!
+Stages - Input 6: set to 0 by default, i.e. perform no stages at all
+RandomisationOff - Input 7: set to 0 by default, i.e. use randomisation
+
+# # # # # INPUT FILE STRUCTURE # # # # #
+
+Only has to contain two columns and as many rows as poins.
+1st col: Points ID as running number ID from 0 to number of points
+2nd col: State is random integer from 0-255 (or any other interval theoretically)
+
+--> To create initial input files use the MATLAB code "MATLAB_create_3Dinitial_states.m" in the respective folder
+
+
+
+

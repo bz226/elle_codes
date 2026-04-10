@@ -1,0 +1,43 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../../elle.tmpl"
+
+SRCS1=  ebsd2elle.cc
+OBJS1=  ebsd2elle.o
+SRCS2=  elle2ebsd.cc
+OBJS2=  elle2ebsd.o
+                                                                                
+SRCS=  $(SRCS1) $(SRCS2)
+OBJS=  $(OBJS1) $(OBJS2)
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+THISAPP1=ebsd2elle
+THISAPP2=elle2ebsd
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPP1),$(BTCHEXT),$(OBJS1),$(BINDIRB))
+
+MakeDisplayX($(THISAPP1),$(XEXT),$(OBJS1),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP1),$(WXEXT),$(OBJS1),$(BINDIRWX))
+                                                                                
+MakeBatch($(THISAPP2),$(BTCHEXT),$(OBJS2),$(BINDIRB))
+                                                                                
+MakeDisplayX($(THISAPP2),$(XEXT),$(OBJS2),$(BINDIRX))
+                                                                                
+MakeDisplayWX($(THISAPP2),$(WXEXT),$(OBJS2),$(BINDIRWX))
+
+CleanMakefile()

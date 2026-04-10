@@ -1,0 +1,31 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  main.cc diffusion.cc diffusiondata.cc rundiffusion.cc poly.c
+OBJS=  main.o diffusion.o diffusiondata.o rundiffusion.o poly.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+THISAPP=elle_diff
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+/*MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))*/
+
+CleanMakefile()
+

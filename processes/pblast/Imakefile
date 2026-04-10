@@ -1,0 +1,38 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+PSRCS=  pblast.main.cc pblast.elle.cc
+POBJS=  pblast.main.o pblast.elle.o
+ESRCS=  expand.main.cc expand.elle.cc
+EOBJS=  expand.main.o expand.elle.o
+SRCS = $(PSRCS) $(ESRCS)
+
+THISAPP1=elle_pblast
+THISAPP2=elle_expand
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+
+MakeBatch($(THISAPP1),$(BTCHEXT),$(POBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP1),$(XEXT),$(POBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP1),$(WXEXT),$(POBJS),$(BINDIRWX))
+
+
+MakeBatch($(THISAPP2),$(BTCHEXT),$(EOBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP2),$(XEXT),$(EOBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP2),$(WXEXT),$(EOBJS),$(BINDIRWX))
+
+CleanMakefile()

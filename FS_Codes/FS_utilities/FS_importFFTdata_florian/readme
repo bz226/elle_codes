@@ -1,0 +1,13 @@
+importFFTdata_florian -i filename.elle -u A B C D E -n (NOTE: There is no "FS_" as prefix)
+    Explanation: Transferring data from tex.out to unode attribute. As input for A,B,C etc. only type the column in tex.out you wish to transfer to the relevant attribute (start counting from 0!!), type "12" if you do not want to transfer anything to the attribute.
+    
+    A: Transfer to U_ATTRIB_A
+    
+    B: Transfer to U_ATTRIB_B
+    
+    C: Transfer to U_ATTRIB_D
+    
+    D: Transfer to U_ATTRIB_E
+    
+    E: Transfer to U_ATTRIB_F
+

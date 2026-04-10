@@ -1,0 +1,37 @@
+For pure shear 2x1 --> 1x2 use:
+
+- native sized images just images from the final ellefiles 
+- unode image in scaled to 1x1
+- GBS images scaled to 2x2
+
+final_scale_fact = 1; 
+
+scaleback2pureshearbox=1; 
+
+expand = 1; % 2 for dislocden
+
+scale_gb_image = 2;
+
+% FOR MOST IMAGES:
+crop_unode_image = 0; % type 1 for yes, 0 for no, usually leave at 0
+rowstart = 2074; rowend = 3268;
+colstart = 31; colend = 2459;
+scalebackto1x1 = 0; % usually leave at zero...only for special cases
+height=1
+if scalebackto1x1==0
+    height = 452;
+end
+
+% FOR GRIDS:
+crop_unode_image = 1; % type 1 for yes, 0 for no, usually leave at 0
+rowstart = 2072; rowend = 3268;
+colstart = 31; colend = 2459;
+scalebackto1x1 = 0; % usually leave at zero...only for special cases
+height=1
+if scalebackto1x1==1
+    height = 1200;
+end
+
+% ONLY FOR GRIDS SET TO 1
+transfer_unode_image_uint8 = 0;
+

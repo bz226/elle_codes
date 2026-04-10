@@ -1,0 +1,14 @@
+#include "../../elle.tmpl"
+
+# DON'T OPTIMIZE
+CFLAGS = -g
+
+SRCS= gpc.c gpc.h gpcclip.cc gpcclip.h
+OBJS= gpc.o gpcclip.o
+
+.c .o:
+    NormalLibraryObjectRule()
+
+MakeLibTarget(clip,_base,$(OBJS),$(LIBDIR),$(INCLUDES_B),base)
+
+CleanMakefile()

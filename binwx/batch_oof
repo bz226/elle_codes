@@ -1,0 +1,21 @@
+#!/bin/sh
+LOCAL=/usr/local
+BIN=$LOCAL/elle/bin #location of the Elle applications
+echo $BIN/elle2poly tmp.elle
+$BIN/elle2poly tmp.elle
+echo $BIN/triangle -pzAen tmp.elle.poly
+$BIN/triangle -pzAen tmp.elle.poly
+echo $BIN/triangle -pzrAen tmp.elle.1.poly
+$BIN/triangle -pzrAen tmp.elle.1.poly
+echo $BIN/triangle -pzrAPna0.000625 tmp.elle.2.poly
+$BIN/triangle -pzrAPna0.000625 tmp.elle.2.poly
+echo /bin/rm -f tmp.elle.*.edge tmp.elle.*.neigh tmp.elle.1* tmp.elle.2* 
+/bin/rm -f tmp.elle.*.edge tmp.elle.*.neigh tmp.elle.1* tmp.elle.2* 
+echo $BIN/poly2goof -i tmp.elle -n
+$BIN/poly2goof -i tmp.elle -n
+echo $LOCAL/oof/oof -grid elle.goof -text -quit
+$LOCAL/oof/oof -grid elle.goof -text -quit
+echo $BIN/goof2elle -i tmp.elle -s 1 -f 1 -n
+$BIN/goof2elle -i tmp.elle -s 1 -f 1 -n
+
+

@@ -1,0 +1,29 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  gbdiff.main.cc gbdiff.elle.cc
+OBJS=  gbdiff.main.o gbdiff.elle.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+THISAPP= elle_gbdiff
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

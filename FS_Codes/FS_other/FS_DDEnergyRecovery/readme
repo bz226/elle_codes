@@ -1,0 +1,14 @@
+FS_DDEnergyRecovery
+
+--> This code uses strain energies as driving force for recovery and allows the calculation of an angular velocity of each unode and hence the scaling to a numerical timestep. It needs a theoretical "rotational viscosity", which is actually a rate factor for recovery (see descriptions in appendix of Florian Steinbach's PhD thesis).
+The code includes a simple model for calculating dislocation densities from misorientations (as used in FS_getmisoriDD).
+
+Usage:
+
+FS_DDEnergyRecovery -i file.elle -u A B C D E -n
+
+A: Critical angle: High angle grain boundary angle, default: 0
+B: ID of excluded phase (set to 0 not to use this, default: 0)
+C: Switch off random picking of flynns, unodes etc. by setting this to 1, default: 0
+D: Set initial "rotational viscosity", 0 is default but will lead to NO rotation
+E: Set initial start step, 0 is default: usually start from 1st step

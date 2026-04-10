@@ -1,0 +1,7 @@
+vs.05 	added check of area of new flynns after split. Although new grains is child1 not always. New grain RX is the flynn with minimum area
+      	update information of unodes (U_ATTRIB_C) and flynn (F_ATTRIB_A)
+
+      	Maintain the condition of critical unode inside a flyn with area lower than critical (5e-4 ¿?) CAUTION, to modify ..  
+
+	Add a check TN and DN
+	add a check to tmplist to prevent error of big list of unodes 

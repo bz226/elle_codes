@@ -1,0 +1,47 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../../elle.tmpl"
+
+SRCS1=   poly2goof.main.cc poly2goof.elle.cc
+OBJS1=   poly2goof.main.o poly2goof.elle.o
+SRCS2=   goof2elle.main.cc goof2elle.elle.cc
+OBJS2=   goof2elle.main.o goof2elle.elle.o
+
+SRCS=  $(SRCS1) $(SRCS2)
+OBJS=  $(OBJS1) $(OBJS2)
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+
+THISAPP1= poly2goof
+THISAPP2= goof2elle
+THISAPP3= batch_oof
+
+.SUFFIXES: .c .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+MakeBatch($(THISAPP1),$(BTCHEXT),$(OBJS1),$(BINDIRB))
+
+MakeDisplayX($(THISAPP1),$(XEXT),$(OBJS1),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP1),$(WXEXT),$(OBJS1),$(BINDIRWX))
+
+
+MakeBatch($(THISAPP2),$(BTCHEXT),$(OBJS2),$(BINDIRB))
+
+MakeDisplayX($(THISAPP2),$(XEXT),$(OBJS2),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP2),$(WXEXT),$(OBJS2),$(BINDIRWX))
+
+InstallTarget(install$(XEXT),$(THISAPP3),NullParameter,$(BINDIRX))
+InstallTarget(install$(WXEXT),$(THISAPP3),NullParameter,$(BINDIRWX))
+
+CleanMakefile()
+

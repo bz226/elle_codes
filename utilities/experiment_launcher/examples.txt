@@ -1,0 +1,330 @@
+Exp 1 Diffusional flow
+Demonstration of diffusion through a fluid trapped in a granular medium using a simple lattice gas automata.    Sub-experiments vary the resolution of the model and the grain size. 
+null
+    Diffusional flow a
+Demonstration of diffusion through a fluid trapped in a granular medium using a simple lattice gas automata.    Very coarse resolution model
+experiment_01_LB_DIFF\a\exp1a
+    Diffusional flow b
+Demonstration of diffusion through a fluid trapped in a granular medium using a simple lattice gas automata.    Coarse resolution model
+experiment_01_LB_DIFF\b\exp1b
+    Diffusional flow c
+Demonstration of diffusion through a fluid trapped in a granular medium using a simple lattice gas automata.    Medium resolution model
+experiment_01_LB_DIFF\c\exp1c
+
+
+
+Exp 2 Fluid flow
+Demonstration of fluid flow in porous medium using a simple lattice gas automata.    Sub-experiments vary the resolution of the model and the grain size. 
+null
+    Fluid flow a
+Demonstration of fluid flow in porous medium using a simple lattice gas automata    Very coarse resolution model
+experiment_02_LB_FLOW\a\exp2a
+    Fluid flow b
+Demonstration of fluid flow in porous medium using a simple lattice gas automata.    Coarse resolution model
+experiment_02_LB_FLOW\b\exp2b
+    Fluid flow c
+Demonstration of fluid flow in porous medium using a simple lattice gas automata.    Medium resolution model
+experiment_02_LB_FLOW\c\exp2c
+
+
+
+Exp 3 Crystal growth
+Single crystal growth from melt, using a phase-field approach.    Sub-experiments vary the symmetry and the interfacial energy of the crystal. 
+null
+    Crystal growth a
+Single crystal growth from melt, using a phase-field approach.    6-fold symmetry, low interfacial energy. 
+experiment_03_PF\a\exp3a
+    Crystal growth b
+Single crystal growth from melt, using a phase-field approach.    5-fold symmetry, high interfacial energy. 
+experiment_03_PF\b\exp3b
+    Crystal growth c
+Single crystal growth from melt, using a phase-field approach.    6-fold symmetry, high interfacial energy. 
+experiment_03_PF\c\exp3c
+    Crystal growth d
+Single crystal growth from melt, using a phase-field approach.    5-fold symmetry, low interfacial energy. 
+experiment_03_PF\d\exp3d
+
+
+
+Exp 4 Granular fracture
+The development of fractures in a granular aggregate during compaction and pure shear deformation using a lattice spring approach.    Sub-experiments vary the resolution of the model and the grain size. 
+null
+    Granular fracture a
+The development of fractures in a granular aggregate during compaction and pure shear deformation using a lattice spring approach.    Very coarse resolution model
+experiment_04_Frac\a\exp4a
+    Granular fracture b
+The development of fractures in a granular aggregate during compaction and pure shear deformation using a lattice spring approach.    Coarse resolution model
+experiment_04_Frac\b\exp4b
+    Granular fracture c
+The development of fractures in a granular aggregate during compaction and pure shear deformation using a lattice spring approach.    Medium resolution model
+experiment_04_Frac\c\exp4c
+
+
+
+Exp 5 Exchange Reaction
+Multi-process experiments simulating cation exchange reactions between garnet and biotite in a quartz matrix.    Sub-experiments vary matrix grain size and temperature.
+null
+    Exchange reaction a
+Cation exchange reactions between garnet and biotite in a quartz matrix.    Isothermal experiment with large matrix grain size.  Use showelle to visualise the results
+experiment_05_Cation\a\exp5a
+    Exchange reaction b
+Cation exchange reactions between garnet and biotite in a quartz matrix.    Isothermal experiment with small matrix grain size.  Use showelle to visualise the results
+experiment_05_Cation\b\exp5b
+    Exchange reaction c
+Cation exchange reactions between garnet and biotite in a quartz matrix.    Cooling experiment.  Use showelle to visualise the results
+experiment_05_Cation\c\exp5c
+
+
+
+Exp 6 Sub-grain growth
+Sub-grain growth resulting from two different conceptual models, using a Potts Model approach.    Sub-experiments choose between models with isotropic and anisotropic subgrain boundary energies.
+null
+    Sub-grain growth a
+Sub-grain growth resulting from two different conceptual models, using a Potts Model approach.    Isotropic subgrain boundary energies.
+experiment_06_SubGG\a\exp6a
+    Sub-grain growth b
+Sub-grain growth resulting from two different conceptual models, using a Potts Model approach.    Anisotropic subgrain boundary energies.
+experiment_06_SubGG\b\exp6b
+
+
+Exp 7 Grain boundary migration
+Simple grain growth experiment using front-tracking approach.    Sub-experiments show migrating boundaries or cumulative area swept by these boundaries.
+null
+    Grain boundary migration a
+Simple grain growth experiment using front-tracking approach.    Migrating grain boundaries.
+experiment_07_GG\a\exp7a
+    Grain boundary migration b
+Simple grain growth experiment using front-tracking approach.    Cumulative area swept by grain boundaries.
+experiment_07_GG\b\exp7b
+
+
+
+Exp 8 Melt pockets
+Evolution of melt pockets with different wetting angles, using a front tracking approach.    Sub-experiments vary the melt-crystal wetting angles.
+null
+    Melt pockets a
+Evolution of melt pockets with different wetting angles, using a front tracking approach.    10 degree wetting angles.
+experiment_08_Melt\a\exp8a
+    Melt pockets b
+Evolution of melt pockets with different wetting angles, using a front tracking approach.    60 degree wetting angles.
+experiment_08_Melt\b\exp8b
+    Melt pockets c
+Evolution of melt pockets with different wetting angles, using a front tracking approach.    120 degree wetting angles.
+experiment_08_Melt\c\exp8c
+
+
+
+Exp 9 Porphyroblast deformation
+Example of a rigid grain during simple shear deformation using a front-tracking-FEM approach.    Sub-experiments vary the viscosity contrast and the finite strain achieved. Use showelle & sybil to visualise the results
+null
+    Porphyroblast deformation a
+Time zero calculation for a rigid grain undergoing simple shear deformation using an FEM model.    Rigid porphyroblast
+experiment_09_Pblast\a\exp9a
+    Porphyroblast deformation b
+Evolution of a rigid grain growing during simple shear deformation using a front-tracking-FEM approach.    Growing porphyroblast.
+experiment_09_Pblast\b\exp9b
+    Porphyroblast deformation c
+Evolution of a rigid grain during simple shear deformation using a front-tracking-FEM approach.    High strain example.
+experiment_09_Pblast\c\exp9c
+
+
+
+Exp 10 Lattice rotations
+Multi-process experiments simulating lattice rotations during heterogeneous deformation using a hybrid TBH-FEM approach.      Use showelle & sybil to visualise the results
+experiment_10_TBH_FEM\exp10
+
+
+
+Exp 11 Boudinage
+The development of boudinage in a granular aggregate during compaction and pure shear deformation, using a lattice spring approach.    Sub-experiments vary the resolution of the model. 
+null
+    Boudinage a
+The development of boudinage in a granular aggregate during compaction and pure shear deformation, using a lattice spring approach.    Very coarse resolution model
+experiment_11_Boudin\a\exp11a
+    Boudinage b
+The development of boudinage in a granular aggregate during compaction and pure shear deformation, using a lattice spring approach.    Coarse resolution model
+experiment_11_Boudin\b\exp11b
+    Boudinage c
+The development of boudinage in a granular aggregate during compaction and pure shear deformation, using a lattice spring approach.    Medium resolution model
+experiment_11_Boudin\c\exp11c
+
+
+
+Exp 12 Dissolution grooves
+The development of dissolution grooves at a stressed crystal-solute interface, using a lattice spring approach.    Sub-experiments vary the resolution of the model. 
+null
+    Dissolution grooves a
+The development of dissolution grooves at a stressed crystal-solute interface, using a lattice spring approach.    Very coarse resolution model
+experiment_12_Grooves\a\exp12a
+    Dissolution grooves b
+The development of dissolution grooves at a stressed crystal-solute interface, using a lattice spring approach.    Coarse resolution model
+experiment_12_Grooves\b\exp12b
+    Dissolution grooves c
+The development of dissolution grooves at a stressed crystal-solute interface, using a lattice spring approach.    Medium resolution model
+experiment_12_Grooves\c\exp12c
+
+
+
+Exp 13 Stylolites
+The development of stylolites at a stressed crystal-solute interface, using a lattice spring approach.    Sub-experiments vary the resolution of the model. 
+null
+    Stylolites a
+The development of stylolites at a stressed crystal-solute interface, using a lattice spring approach.    Very coarse resolution model 
+experiment_13_Stylo\a\exp13a
+    Stylolites b
+The development of stylolites at a stressed crystal-solute interface, using a lattice spring approach.    Coarse resolution model 
+experiment_13_Stylo\b\exp13b
+    Stylolites c
+The development of stylolites at a stressed crystal-solute interface, using a lattice spring approach.    Medium resolution model 
+experiment_13_Stylo\c\exp13c
+
+
+
+Exp 14 Strain-rate partitioning
+Evolving strain-rate partitioning behaviour within a layered succession during porphyroblast growth, using a hybrid FEM-front-tracking approach.     Sub-experiments allow the growth and the deformation processes to be toggled on or off.
+null
+    Strain-rate partitioning a
+Evolving strain-rate partitioning behaviour within a layered succession during porphyroblast growth, using a hybrid FEM-front-tracking approach.     No deformation
+experiment_14_Pblast_loc\a\exp_14a
+    Strain-rate partitioning b
+Evolving strain-rate partitioning behaviour within a layered succession during porphyroblast growth, using a hybrid FEM-front-tracking approach.     No porphroblast growth
+experiment_14_Pblast_loc\b\exp_14b
+    Strain-rate partitioning c
+Evolving strain-rate partitioning behaviour within a layered succession during porphyroblast growth, using a hybrid FEM-front-tracking approach.     Deformation and porphyroblast growth
+experiment_14_Pblast_loc\c\exp_14c
+
+
+
+Exp 15 Anisotropic Grain Growth
+Anisotropic grain growth experiments, using a front-tracking approach.     Sub-experiments choose between models with isotropic and anisotropic grain boundary energies.
+null
+    Anisotropic Grain Growth a
+Anisotropic grain growth experiments, using a front-tracking approach.     Isotropic grain boundary energies.
+experiment_15_GBM\a\exp15a
+    Anisotropic Grain Growth b
+Anisotropic grain growth experiments, using a front-tracking approach.     Very low anisotropy grain boundary energies.
+experiment_15_GBM\b\exp15b
+    Anisotropic Grain Growth c
+Anisotropic grain growth experiments, using a front-tracking approach.     Low anisotropy grain boundary energies.
+experiment_15_GBM\c\exp15c
+    Anisotropic Grain Growth d
+Anisotropic grain growth experiments, using a front-tracking approach.     Medium anisotropy grain boundary energies.
+experiment_15_GBM\d\exp15d
+    Anisotropic Grain Growth e
+Anisotropic grain growth experiments, using a front-tracking approach.     High anisotropy grain boundary energies.
+experiment_15_GBM\e\exp15e
+    Anisotropic Grain Growth f
+Anisotropic grain growth experiments, using a front-tracking approach.     Very high anisotropy grain boundary energies.
+experiment_15_GBM\f\exp15f
+
+
+
+Exp 16 Dynamic Recrystallization    
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Sub-experiments choose between models with different starting grain sizes and grain boundary mobilities
+null
+    Dynamic Recrystallization  a  
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Fine grained, low mobility
+experiment_16_DRX\a\exp_16a
+    Dynamic Recrystallization  b 
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Fine grained, medium mobility
+experiment_16_DRX\b\exp_16b
+    Dynamic Recrystallization  c 
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Fine grained, high mobility
+experiment_16_DRX\c\exp_16c
+    Dynamic Recrystallization  d
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Coarse grained, low mobility
+experiment_16_DRX\d\exp_16d
+    Dynamic Recrystallization  e  
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Coarse grained, medium mobility
+experiment_16_DRX\e\exp_16e
+    Dynamic Recrystallization  f
+Simulation of dynamic recrystallisation during plane strain simple shear deformation of a polycrystal, combining several different modelling schemes.    Coarse grained, high mobility
+experiment_16_DRX\f\exp_16f
+
+
+
+Exp 17 Deformation Localisation
+Multi-process experiments exploring the controls on deformation localisation, using a hybrid FEM-front-tracking approach.    Sub-experiments choose between models with different stress exponents and the presence or absence of grain-size modifying processes.
+null
+    Deformation Localisation a
+Experiments exploring the controls on deformation localisation, using a hybrid FEM-front-tracking approach.    Stress exponent = 1, no grain-size modifying processes. Use showelle & sybil to visualise the results
+experiment_17_Local\a\exp_17a
+    Deformation Localisation b
+Experiments exploring the controls on deformation localisation, using a hybrid FEM-front-tracking approach.    Stress exponent = 3, no grain-size modifying processes. Use showelle & sybil to visualise the results
+experiment_17_Local\b\exp_17b
+    Deformation Localisation c
+Experiments exploring the controls on deformation localisation, using a hybrid FEM-front-tracking approach.    Stress exponent = 1, active grain-size modifying processes. Use showelle & sybil to visualise the results
+experiment_17_Local\c\exp_17c
+    Deformation Localisation d
+Experiments exploring the controls on deformation localisation, using a hybrid FEM-front-tracking approach.    Stress exponent = 3, active grain-size modifying processes. Use showelle & sybil to visualise the results
+experiment_17_Local\d\exp_17d
+
+
+
+Exp 18 Expanding inclusions
+Evolution of single grains  expanding in a brittle matrix, using a lattice spring approach.    Sub-experiments vary the resolution of the model. 
+null
+    Expanding inclusions a
+Evolution of single grains  expanding in a brittle matrix, using a lattice spring approach.    Very coarse resolution model 
+experiment_18_Inclusions\a\exp18a
+    Expanding inclusions b
+Evolution of single grains  expanding in a brittle matrix, using a lattice spring approach.    Coarse resolution model 
+experiment_18_Inclusions\b\exp18b
+    Expanding inclusions c
+Evolution of single grains  expanding in a brittle matrix, using a lattice spring approach.    Medium resolution model 
+experiment_18_Inclusions\c\exp18c
+
+
+
+Exp 19 Mudcracks
+The development of shrinkage cracks in a brittle medium, using a lattice spring approach.    Sub-experiments vary the resolution of the model. 
+null
+    Mudcracks a
+The development of shrinkage cracks in a brittle medium, using a lattice spring approach.    Very coarse resolution model 
+experiment_19_Mudcracks\a\exp19a
+    Mudcracks b
+The development of shrinkage cracks in a brittle medium, using a lattice spring approach.    Coarse resolution model 
+experiment_19_Mudcracks\b\exp19b
+    Mudcracks c
+The development of shrinkage cracks in a brittle medium, using a lattice spring approach.    Medium resolution model 
+experiment_19_Mudcracks\c\exp19c
+
+
+
+Exp 20 Visco-elastic deformation
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Sub-experiments vary the resolution of the model and the shape of the brittle feature. 
+null
+    Visco-elastic deformation a
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Very coarse resolution model, brittle grain
+experiment_20_Visco_elastic\a\exp20a
+    Visco-elastic deformation b
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Coarse resolution model, brittle grain
+experiment_20_Visco_elastic\b\exp20b
+    Visco-elastic deformation c
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Medium resolution model, brittle grain
+experiment_20_Visco_elastic\c\exp20c
+    Visco-elastic deformation f
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Very coarse resolution model, brittle layer
+experiment_20_Visco_elastic\f\exp20f
+    Visco-elastic deformation g
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Coarse resolution model, brittle layer
+experiment_20_Visco_elastic\g\exp20g
+    Visco-elastic deformation h
+The deformation of brittle grains or layers in a viscous matrix, using a lattice spring approach.    Medium resolution model, brittle layer
+experiment_20_Visco_elastic\h\exp20h
+
+
+
+Exp 21 Rigid object kinematics
+Deformation experiments involving porphyroblasts with deformable mica caps, using a FEM approach.    Sub-experiments vary the relative viscosity of the porphyroblasts to the mica caps.
+null
+    Rigid object kinematics a
+Deformation experiments involving porphyroblasts with deformable mica caps, using a FEM approach.    Relative viscosity of the porphyroblasts to the mica caps of 1.
+experiment_21_Rigid_obj\a\exp_21a
+    Rigid object kinematics b
+Deformation experiments involving porphyroblasts with deformable mica caps, using a FEM approach.    Relative viscosity of the porphyroblasts to the mica caps of 5.
+experiment_21_Rigid_obj\b\exp_21b
+    Rigid object kinematics c
+Deformation experiments involving porphyroblasts with deformable mica caps, using a FEM approach.    Relative viscosity of the porphyroblasts to the mica caps of 25.
+experiment_21_Rigid_obj\c\exp_21c
+

@@ -1,0 +1,31 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+/* change the next 4 lines to suit your application */
+SRCS=  ranorient.main.cc ranorient.elle.cc /* source files for your code */
+OBJS=  ranorient.main.o ranorient.elle.o /* object files for your code */
+THISAPP= ranorient                       /* the name of your executable */
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+CleanMakefile()

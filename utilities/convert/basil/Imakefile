@@ -1,0 +1,41 @@
+#include "../../../elle.tmpl"
+
+/*
+ * sybfile.c arrays.c *.f
+ * sybfile.h arrays.h data.h
+ * are copies of the basil/sybilsrc files
+ * - separate copies as basil may not always be on a system
+ */
+SRCS=  elle2poly.cc basil2elle.cc flags.cc c_funcs.cc\
+       arrays.c parseopts.c\
+       bndlist.cc\
+       sybfile.c strain.f dncom.f polygonavg.f lgdef.f profil.f
+
+EPOBJS=  elle2poly.o flags.o bndlist.o
+
+BEOBJS=  basil2elle.o\
+         arrays.o parseopts.o c_funcs.o\
+         sybfile.o strain.o dncom.o polygonavg.o lgdef.o profil.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DFLAGS= -DFLYNN_VER
+DEFINES= $(DFLAGS)
+
+THISAPP1=elle2poly
+THISAPP2=basil2elle
+
+.SUFFIXES:
+.SUFFIXES: .cc .c .f .o
+
+.cc.o:
+	ObjectCplusplusCompile($(DFLAGS))
+
+MakeBase($(THISAPP1),$(BASEEXT),$(EPOBJS),$(BINDIRB))
+InstallNamedTarget(install$(XEXT),$(THISAPP1)$(BASEEXT),NullParameter,$(BINDIRX),$(THISAPP1))
+InstallNamedTarget(install$(WXEXT),$(THISAPP1)$(BASEEXT),NullParameter,$(BINDIRWX),$(THISAPP1))
+
+MakeBase($(THISAPP2),$(BASEEXT),$(BEOBJS),$(BINDIRB))
+InstallNamedTarget(install$(XEXT),$(THISAPP2)$(BASEEXT),NullParameter,$(BINDIRX),$(THISAPP2))
+InstallNamedTarget(install$(WXEXT),$(THISAPP2)$(BASEEXT),NullParameter,$(BINDIRWX),$(THISAPP2))
+
+CleanMakefile()

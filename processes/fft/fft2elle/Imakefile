@@ -1,0 +1,31 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../../elle.tmpl"
+
+SRCS=  fft2elle.cc 
+OBJS=  fft2elle.o 
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+THISAPP=fft2elle
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

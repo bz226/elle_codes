@@ -1,0 +1,188 @@
+
+/*#define __WIN32__ 1*/
+
+#ifdef AlphaArchitecture
+CXX = g++
+#undef CCsuf
+#define CCsuf cc
+#endif
+
+F77LIB= -lfor
+
+#ifdef LinuxArchitecture
+#if (GccMajorVersion > 3 )
+F77LIB= -lgfortran
+FC=gfortran
+#else
+F77LIB= -lg2c
+FC=g77
+#endif
+#ifdef UseStaticf2cLib
+F77LIB= /usr/lib/libf2c.a
+#endif
+#endif
+
+#ifdef ppcArchitecture
+#ifdef FortranCmd
+#undef FortranCmd
+#define FortranCmd fort77
+#endif
+F77LIB= -lf2c
+#endif
+
+#ifdef __CYGWIN__
+F77LIB= -lg2c
+#endif
+
+#ifdef __WIN32__
+F77LIB= -lg2c
+FC=g77
+
+#define ExtraFilesToClean *.exe
+
+/*WXWIN=/c/wxwin261*/
+WXCONFIGDIR=$(WXWIN)/build-msw
+
+               CC = gcc 
+               AS = gcc -c -x assembler
+
+.SUFFIXES: .cc
+
+              CXX = g++ 
+
+          CXXFILT = g++filt
+           CXXLIB =
+    CXXDEBUGFLAGS = -O2  -fno-rtti -fno-exceptions -Wall -Wextra -pedantic
+CXXDEPENDINCLUDES =
+ CXXEXTRA_DEFINES =
+CXXEXTRA_INCLUDES = -I/mingw/include -I$(WXWIN)/src/zlib
+   CXXSTD_DEFINES = -D__GNUWIN32__ -DWINVER=0x0400 -D__WIN95__
+      CDEBUGFLAGS = -O2  -fno-rtti -fno-exceptions -Wall -Wextra -pedantic
+        CCOPTIONS = -I/mingw/include -I$(WXWIN)/src/zlib
+
+BASELIBS=-lstdc++ -lodbc32 -lwsock32
+#if wxUSE_GUI==1
+  WINLIBS= $(BASELIBS) \
+	  -lwinspool -lwinmm -lshell32 -lkernel32 -luser32 \
+	  -lcomctl32 -lctl3d32 -lodbc32 -ladvapi32 \
+	  -lodbc32 -lwsock32 -lopengl32 -lglu32 -lgdi32 -lcomdlg32 $(OLELIBS) #  -loldnames
+#else
+  WINLIBS=$(BASELIBS)
+#endif
+
+RCLFLAGS=-cpp "cpp -lang-c++ $(OBSOLETE_DEFINES) -DRCL_INVOKED -I$(WXWIN)/include"
+
+#ifdef WXUSINGDLL
+   /*png, jpeg, etc are exported from wx dll, so skip and save on link time.*/
+  LDLIBS = $(EXTRALIBS) $(WXLIB) $(WINLIBS) $(COMPLIBS)
+#else
+LDLIBS = `$(WXCONFIGDIR)/wx-config --libs` $(WINLIBS) $(COMPLIBS)
+#endif
+#endif
+
+      ALLINCLUDES = $(INCLUDES) $(EXTRA_INCLUDES) $(TOP_INCLUDES) $(INSTALLED_INCLUDES) $(STD_INCLUDES)
+       ALLDEFINES = $(ALLINCLUDES) $(STD_DEFINES) $(PROTO_DEFINES) $(THREADS_DEFINES) $(MODULE_DEFINES) $(DEFINES) $(EXTRA_DEFINES)
+           CFLAGS = $(CDEBUGFLAGS) $(CCOPTIONS) $(THREADS_CFLAGS) $(MODULE_CFLAGS) $(ALLDEFINES)
+        LINTFLAGS = $(LINTOPTS) -DLINT $(ALLDEFINES) $(DEPEND_DEFINES)
+         LDPRELIB = -L$(USRLIBDIR) $(INSTALLED_LIBS)
+        LDPOSTLIB =
+        LDOPTIONS = $(CDEBUGFLAGS) $(CCOPTIONS)  $(EXTRA_LDOPTIONS) $(THREADS_LDFLAGS) $(LOCAL_LDFLAGS) $(LDPRELIBS)
+     CXXLDOPTIONS = $(CXXDEBUGFLAGS) $(CXXOPTIONS) $(EXTRA_LDOPTIONS) $(THREADS_CXXLDFLAGS) $(LOCAL_LDFLAGS) $(LDPRELIBS)
+
+
+           CCLINK = $(CC)
+
+          CXXLINK = $(CXX)
+
+     LDSTRIPFLAGS = -x
+   LDCOMBINEFLAGS = -r
+      DEPENDFLAGS =
+   DEPEND_DEFINES =
+
+
+
+
+BASEEXT=_base
+BTCHEXT=_b
+XEXT=_x
+WXEXT=_wx
+
+BSRCD = $(TOP)/basecode
+PSRCD = $(TOP)/plotcode
+WXPSRCD = $(TOP)/wxplotcode
+SSRCD = $(TOP)/statscode
+CSRCD = $(TOP)/utilities/gpc
+MSRCD = $(TOP)/utilities/matrix
+#ifdef __WIN32__
+P_FLAGS = `$(WXCONFIGDIR)/wx-config --cflags` -DSTRICT -DHAVE_W32API_H -D__WXMSW__ -D__WINDOWS__ -DwxUSE_GLCANVAS
+B_OPTIONS  = -I$(BSRCD) $(P_FLAGS) -DNO_TIMER
+#else
+P_FLAGS = `wx-config --cflags`
+B_OPTIONS  = -I$(BSRCD)
+#endif
+P_OPTIONS  = -I$(PSRCD)
+WXP_OPTIONS  = -I$(WXPSRCD) $(P_FLAGS)
+S_OPTIONS  = -I$(SSRCD)
+C_OPTIONS  = -I$(CSRCD)
+M_OPTIONS  = -I$(MSRCD)
+BINDIR  = $(TOP)/bin
+BINDIRB  = $(TOP)/binb
+BINDIRX  = $(TOP)/binx
+BINDIRWX  = $(TOP)/binwx
+LIBDIR  = $(TOP)/lib
+WXPLOTLIB  = -lplot$(WXEXT)
+PLOTLIB  = -lplot$(XEXT)
+PSLIB    = -lps
+ELLELIB  = -lelle
+ELLEBLIB = -lelle$(BTCHEXT)
+ELLEXLIB = -lelle$(XEXT)
+ELLEWXLIB = -lelle$(WXEXT)
+CLIPLIB  = -lclip
+MATRLIB  = -lmatrix
+GSL_LIB  = -lgsl -lgslcblas
+ZLIB	= -lz
+#ifdef __WIN32__
+ZLIB	= 
+ZLIB	= -lwxzlib-2.6
+#endif
+
+DEPPLOTLIB  = $(LIBDIR)/libplot$(XEXT).a
+DEPWXPLOTLIB  = $(LIBDIR)/libplot$(WXEXT).a
+DEPPSLIB  = $(LIBDIR)/libps.a
+DEPELLELIB  = $(LIBDIR)/libelle.a
+DEPCLIPLIB  = $(LIBDIR)/libclip.a
+DEPMATRLIB  = $(LIBDIR)/libmatrix.a
+DEPELLEXLIB = $(LIBDIR)/libelle$(XEXT).a
+DEPELLEWXLIB = $(LIBDIR)/libelle$(WXEXT).a
+DEPELLEBLIB = $(LIBDIR)/libelle$(BTCHEXT).a
+
+#ifdef __WIN32__
+LOCAL_LIBRARIES_WX = $(ELLEWXLIB) $(ELLELIB) $(ELLEWXLIB) $(WXPLOTLIB) $(MATRLIB) $(CLIPLIB)  $(ZLIB) $(F77LIB)
+#else
+LOCAL_LIBRARIES_WX = $(ELLEWXLIB) $(ELLELIB) $(ELLEWXLIB) $(WXPLOTLIB) $(MATRLIB) $(CLIPLIB)  $(ZLIB) $(F77LIB) $(GSL_LIB) `wx-config --libs`
+#endif
+DEPLIBS_WX = $(DEPWXPLOTLIB) $(DEPELLELIB) $(DEPELLEWXLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+DEPLIBS = $(DEPWXPLOTLIB) $(DEPELLELIB) $(DEPELLEWXLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+LOCAL_LIBRARIES_X = $(ELLEXLIB) $(ELLELIB) $(ELLEXLIB) $(PLOTLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(XMLIB) $(XTOOLLIB) $(XLIB) $(F77LIB)
+DEPLIBS_X = $(DEPPLOTLIB) $(DEPELLELIB) $(DEPELLEXLIB) $(DEPMATRLIB) $(DEPCLIPLIB) $(DEPXMLIB) $(DEPXTOOLLIB) $( DEPXLIB)
+LOCAL_LIBRARIES_PS = $(ELLELIB) $(ELLEXLIB) $(PSLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(F77LIB)  $(GSL_LIB)
+DEPLIBS_PS = $(DEPELLEXLIB) $(DEPPSLIB) $(DEPELLELIB) $(DEPELLEXLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+LOCAL_LIBRARIES_B =  $(ELLEBLIB) $(ELLELIB) $(ELLEBLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(F77LIB)  $(GSL_LIB)
+DEPLIBS_B  = $(DEPELLELIB) $(DEPELLEBLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+INCLUDES_BASE= $(B_OPTIONS) $(P_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_B= $(B_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_WX= $(B_OPTIONS) $(WXP_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_X= $(B_OPTIONS) $(P_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+
+INCLUDES= $(INCLUDES_B)
+LOCAL_LIBARIES= $(LOCAL_LIBRARIES_B)
+EXTRA_LOAD_FLAGS= -L$(LIBDIR)
+
+
+PREFIX=/usr/local
+
+SRCDIR = .
+OBJDIR = .
+
+DFLAGS = -DXSYB
+#include "extra.rules"

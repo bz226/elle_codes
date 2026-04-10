@@ -1,0 +1,17 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+TXT=  shelle25.html
+
+
+InstallTarget(install$(WXEXT),$(TXT),NullParameter,$(BINDIRWX))
+
+CleanMakefile()

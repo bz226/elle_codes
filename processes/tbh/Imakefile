@@ -1,0 +1,32 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  tbh.main.cc tbh.elle.cc tbh.f
+OBJS=  tbh.main.o tbh.elle.o tbh.o
+THISAPP=elle_tbh
+
+SYSLIBS = $(F77LIB) -lm
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

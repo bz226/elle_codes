@@ -1,0 +1,11 @@
+FS_flynn2unode_attribute:
+
+A small script that transfers flynn attributes to the relecant unode "sitting above" this flynn.
+
+User input:
+
+user defined inputs are caleld: "VISCOSITY" "EULER_3" "DISLOCDEN" "F_ATTRIB_A"
+Set the relevant input to one to transfer the flynn attribute to the unodes, for instance:
+
+(...) -u 1 0 1 0 means:
+Transfer "VISCOSITY", DON'T transfer "EULER_3", transfer "DISLOCDEN" and DON'T transfer "F_ATTRIB_A"

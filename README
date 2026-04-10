@@ -1,0 +1,36 @@
+
+------------------------------------------------------------------
+INSTALLATION NOTES for ELLE
+------------------------------------------------------------------
+
+UNIX systems
+
+In the following steps, replace /usr/local with the directory in which
+you decide to install the package.
+
+1)  elle.tar.gz (or elle.tgz)
+    Extract the file in an appropriate directory, usually /usr/local.
+      tar xzf elle.tar.gz 
+
+    elle.tar.Z
+    Uncompress and untar the elle.tar.Z file in an appropriate directory,
+    usually /usr/local.
+      uncompress elle.tar.Z
+      tar xvf elle.tar
+    or
+      zcat elle.tar.Z | tar xvf -
+
+2) change to the directory /usr/local/elle/elle and run
+     ./install.sh help
+   and follow the instructions to build the versions you need.
+   To compile the WX programs, you must have wxWidgets libraries
+   installed (www.wxwidgets.org)
+   This script uses xmkmf, imake and the configuration files in
+   the X11 configuration directory (eg /usr/X11R6/lib/config)
+
+CYGWIN
+
+1) as above
+
+2) change to the directory /usr/local/elle/elle and run
+     ./install.win wx

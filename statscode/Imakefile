@@ -1,0 +1,15 @@
+#include "../elle.tmpl"
+
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+SRCDIR = .
+OBJDIR = .
+
+AllTarget($(BSRCD)/statsfns.o)
+SpecialRenameCplusplusObjectRule($(BSRCD)/statsfns.o,statsfns.cc,$(B_OPTIONS))
+base::$(BSRCD)/statsfns.o
+batch::$(BSRCD)/statsfns.o
+CleanMakefile()
+DependTarget()

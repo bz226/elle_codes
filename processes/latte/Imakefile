@@ -1,0 +1,26 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  elle.main.cc phase_base.cc min_trans.cc heat_lattice.cc phase_lattice.cc particle.cc lattice.cc experiment.cc graingrowth.cc startfromgui.cc
+OBJS=  elle.main.o phase_base.o min_trans.o heat_lattice.o phase_lattice.o particle.o lattice.o experiment.o graingrowth.o startfromgui.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+THISAPP=elle_latte
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

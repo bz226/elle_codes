@@ -1,0 +1,10 @@
+all: FS_gg_potts3D
+
+FS_gg_potts3D: FS_gg_potts3D.o
+	g++ FS_gg_potts3D.o -o FS_gg_potts3D
+
+FS_gg_potts3D.o.o: FS_gg_potts3D.o.cpp
+	g++ -c FS_gg_potts3D.o.cpp
+
+clean:
+	rm FS_gg_potts3D.o

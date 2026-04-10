@@ -1,0 +1,141 @@
+/*
+ * change the next 4 lines to suit your application
+ * then copy the line to set the type of executable
+ */
+LOCAL = /home/usuari/programs/elle/elle   /* location of the elle library code */
+SRCS=  gbm.main.cc gbm.elle.cc movenode.cc /* source files for your code */
+OBJS=  gbm.main.o gbm.elle.o movenode.o /* object files for your code */
+THISAPP= gbm_unodes_user   /* the name of your executable */
+
+/*
+ * batch version, no graphics
+#define BuildBatch 1
+ * wx version, wx/gl graphics
+#define BuildWX 1
+ * x version, X11/Motif graphics
+#define BuildX 1
+ */
+#define BuildBatch 1
+
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#ifdef AlphaArchitecture
+CXX = g++
+#undef CCsuf
+#define CCsuf cc
+#endif
+
+F77LIB= -lfor
+#ifdef LinuxArchitecture
+F77LIB= /usr/lib/libf2c.a
+F77LIB= -lg2c
+#ifdef __powerpc__
+F77LIB= -lg2c
+#endif
+#endif
+
+#ifdef ppcArchitecture
+#ifdef FortranCmd
+#undef FortranCmd
+#define FortranCmd fort77
+#endif
+F77LIB= -lf2c
+#endif
+
+BASEEXT=_base
+BTCHEXT=_b
+XEXT=_x
+WXEXT=_wx
+
+BSRCD = $(LOCAL)/basecode
+PSRCD = $(LOCAL)/plotcode
+WXPSRCD = $(LOCAL)/wxplotcode
+SSRCD = $(LOCAL)/statscode
+CSRCD = $(LOCAL)/utilities/gpc
+MSRCD = $(LOCAL)/utilities/matrix
+P_FLAGS = `wx-config --cflags`
+B_OPTIONS  = -I$(BSRCD)
+P_OPTIONS  = -I$(PSRCD)
+WXP_OPTIONS  = -I$(WXPSRCD) $(P_FLAGS)
+S_OPTIONS  = -I$(SSRCD)
+C_OPTIONS  = -I$(CSRCD)
+M_OPTIONS  = -I$(MSRCD)
+BINDIR  = .
+LIBDIR  = $(LOCAL)/lib
+WXPLOTLIB  = -lplot$(WXEXT)
+PLOTLIB  = -lplot$(XEXT)
+PSLIB    = -lps
+ELLELIB  = -lelle
+ELLEBLIB = -lelle$(BTCHEXT)
+ELLEXLIB = -lelle$(XEXT)
+ELLEWXLIB = -lelle$(WXEXT)
+CLIPLIB  = -lclip
+MATRLIB  = -lmatrix
+ZLIB    = -lz
+DEPPLOTLIB  = $(LIBDIR)/libplot$(XEXT).a
+DEPWXPLOTLIB  = $(LIBDIR)/libplot$(WXEXT).a
+DEPPSLIB  = $(LIBDIR)/libps.a
+DEPELLELIB  = $(LIBDIR)/libelle.a
+DEPCLIPLIB  = $(LIBDIR)/libclip.a
+DEPMATRLIB  = $(LIBDIR)/libmatrix.a
+DEPELLEXLIB = $(LIBDIR)/libelle$(XEXT).a
+DEPELLEWXLIB = $(LIBDIR)/libelle$(WXEXT).a
+DEPELLEBLIB = $(LIBDIR)/libelle$(BTCHEXT).a
+
+LOCAL_LIBRARIES_WX = `wx-config --gl-libs --libs` $(ELLEWXLIB) $(ELLELIB) $(ELLEWXLIB) $(WXPLOTLIB) $(MATRLIB) $(CLIPLIB)  $(ZLIB) $(F77LIB)
+DEPLIBS = $(DEPWXPLOTLIB) $(DEPELLELIB) $(DEPELLEWXLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+LOCAL_LIBRARIES_X = $(ELLEXLIB) $(ELLELIB) $(ELLEXLIB) $(PLOTLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(XMLIB) $(XTOOLLIB) $(XLIB) $(F77LIB)
+DEPLIBS_X = $(DEPPLOTLIB) $(DEPELLELIB) $(DEPELLEXLIB) $(DEPMATRLIB) $(DEPCLIPLIB) $(DEPXMLIB) $(DEPXTOOLLIB) $( DEPXLIB)
+LOCAL_LIBRARIES_PS = $(ELLELIB) $(ELLEXLIB) $(PSLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(F77LIB)
+DEPLIBS_PS = $(DEPELLEXLIB) $(DEPPSLIB) $(DEPELLELIB) $(DEPELLEXLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+LOCAL_LIBRARIES_B =  $(ELLEBLIB) $(ELLELIB) $(ELLEBLIB) $(MATRLIB) $(CLIPLIB) $(ZLIB) $(F77LIB)
+DEPLIBS_B  = $(DEPELLELIB) $(DEPELLEBLIB) $(DEPMATRLIB) $(DEPCLIPLIB)
+INCLUDES_BASE= $(B_OPTIONS) $(P_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_B= $(B_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_WX= $(B_OPTIONS) $(WXP_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+INCLUDES_X= $(B_OPTIONS) $(P_OPTIONS) $(S_OPTIONS) $(M_OPTIONS) $(C_OPTIONS)
+
+INCLUDES= $(INCLUDES_B)
+LOCAL_LIBARIES= $(LOCAL_LIBRARIES_B)
+EXTRA_LOAD_FLAGS= -L$(LIBDIR)
+
+#ifdef BuildBatch
+LOCAL_LIBRARIES = $(LOCAL_LIBRARIES_B)
+DEPLIBS = $(DEPLIBS_B)
+INCLUDES= $(INCLUDES_B)
+#endif
+
+#ifdef BuildWX
+LOCAL_LIBRARIES = $(LOCAL_LIBRARIES_WX)
+DEPLIBS = $(DEPLIBS_WX)
+INCLUDES= $(INCLUDES_WX)
+#endif
+
+#ifdef BuildX
+LOCAL_LIBRARIES = $(LOCAL_LIBRARIES_X)
+DEPLIBS = $(DEPLIBS_X)
+INCLUDES= $(INCLUDES_X)
+#endif
+
+DEFINES= -DXSYB
+
+AllTarget($(THISAPP))
+
+.SUFFIXES: .cc .o
+       NormalCplusplusObjectRule()
+
+
+NormalCplusplusProgramTarget($(THISAPP),$(OBJS),$(DEPLIBS),$(LOCAL_LIBRARIES),-lm)
+
+InstallProgram($(THISAPP),$(BINDIR))
+
+DependTarget()
+
+

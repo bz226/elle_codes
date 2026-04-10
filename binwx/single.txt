@@ -1,0 +1,21 @@
+showelle
+The elle graphical postprocessor
+showelle
+tidy
+Utility to modify your elle file
+tidy
+ppm2elle
+Utility to create an elle file from a Portable Pixel Map (PPM) format file
+ppm2elle
+elle_gg
+Grain growth due to surface energy driven grain boundary migration
+elle_gg
+sybil
+The basil graphical postprocessor
+sybil
+Shelle Script Generator
+The multi-process script generator (uses a standard web browser)
+shelle24.html
+elle_latte experiment wizard
+The elle_latte script generator which helps you to define elle_latte experiments
+lattestart

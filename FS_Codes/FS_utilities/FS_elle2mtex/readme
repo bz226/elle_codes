@@ -1,0 +1,5 @@
+FS_elle2mtex -i filename.elle -n
+    --> Creating MTEX input from ellefile, that has n rows (n=number of unodes) and 6 columns, which indicate
+    unodeX unodeY alpha beta gamma phaseID
+    --> For that purpose U_EULER_3 and U_VISCOSITY have to be active in unodes
+    --> The script has no further user input

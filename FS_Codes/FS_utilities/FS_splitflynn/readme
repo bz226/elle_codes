@@ -1,0 +1,13 @@
+Splits a flynn along two user defined bnodes. HANDLE WITH CARE! CAN MESS UP GRAIN SIZE STATISTICS!
+
+Make sure you choose the right bnodes: They need to be double junctions! There is no additional check in the code.
+
+The code automatically assigns the new flynn created by splitting to its unodes and updates U_ATTRIB_C, which is usually storing the respective flynn ID of the flynn that contains this unode
+
+Usage:
+
+FS_splitflynn -i file.elle -u bnode1 bnode2 flynn_split -n
+
+flynn_split is the flynn ID of the flynn you want to split
+
+

@@ -1,0 +1,25 @@
+
+#include "../elle.tmpl"
+
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+SRCDIR = .
+OBJDIR = .
+
+DFLAGS = -DXSYB
+#
+DSRCS= wxstart.cc showelle.cc canvas.cc preferences.cc settings.cc dsettings.cc rundia.cc psprint.cc basetable.cc simwiz.cc cppfile.cc plotaxes.elle.cc
+
+DOBJS= wxstart.o showelle.o canvas.o preferences.o settings.o dsettings.o rundia.o psprint.o basetable.o simwiz.o cppfile.o plotaxes.elle.o
+
+SRCS= $(DSRCS)
+DEFINES= $(DFLAGS)
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+MakeLibTarget(plot$(WXEXT),$(WXEXT),$(DOBJS),$(LIBDIR),$(INCLUDES_WX),display_wx)
+
+CleanMakefile()

@@ -1,0 +1,23 @@
+/* XPM */
+static const char *markflynn[]={
+"16 16 4 1",
+". c None",
+"b c #c0c000",
+"# c #ff0000",
+"a c #ffffff",
+"...###aaaa###...",
+"....#bbbbbb#....",
+"...abbbbbbbba...",
+"...abbbbbbbbba..",
+"..abbbbbbbbbba.#",
+"a#abbbbbbbbbbb##",
+"###bbbbbbbbbbbb#",
+"a#bbbbbbbbbbbbba",
+"abbbbbbbbbbbbbba",
+"abbbbbbbbbbbbba.",
+".abbbbbbbbbbbba.",
+"..abbbbbbbbbbba.",
+"..abbbbbbbbbba..",
+"...abbbbbbbbb#..",
+"....#bbbbbbb###.",
+"...###aaaaaaa#.a"};

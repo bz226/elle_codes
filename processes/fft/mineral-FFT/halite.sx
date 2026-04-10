@@ -1,0 +1,42 @@
+SLIP SYSTEMS FOR HALITE
+CUBIC               icryst
+   1.   1.   1.   crystal axes (cdim(i))
+   3              nmodesx (total # of modes listed in the file)
+   3              nmodes  (# of modes to be used in the calculation)
+   1  2  3        mode(i) (label of the modes to be used)
+   (110)<1-10> SLIP
+  1   6   7   1.0   0.0   0          modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  1.0  1.0   0.0   0.0   0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0                 hselfx,hlatex
+   1    1    0      1   -1    0      SLIP (n-b)
+  -1    1    0      1    1    0
+   1    0    1      1    0   -1
+   1    0   -1      1    0    1
+   0    1    1      0    1   -1
+   0    1   -1      0    1    1
+   (100)<011> SLIP
+  2   6   7   1.0   0.0   0          modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  50.0   50.0   0.0   0.0  0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0                 hselfx,hlatex
+   1    0    0      0    1    1      SLIP (n-b)
+   1    0    0      0    1   -1
+   0    1    0      1    0    1
+   0    1    0      1    0   -1
+   0    0    1      1    1    0
+   0    0    1      1   -1    0
+   (111)<1-10> SLIP
+  3   12   7   1.0   0.0   0         modex,nsmx,nrsx,gamd0x,twshx,isectw
+  50.0   50.0   0.  0.  0.0            tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0                 hselfx,hlatex
+   1    1    1      1   -1    0      SLIP (n-b)
+   1    1    1      1    0   -1
+   1    1    1      0    1   -1
+  -1    1    1      0    1   -1
+  -1    1    1      1    0    1
+  -1    1    1      1    1    0
+   1   -1    1      0    1    1
+   1   -1    1      1    0   -1
+   1   -1    1      1    1    0
+  -1   -1    1      0    1    1
+  -1   -1    1      1    0    1
+  -1   -1    1      1   -1    0

@@ -1,0 +1,14 @@
+This utility creates a postscript file from an elle file that started with a square 
+unode grid distribution. After deformation this gives the lagrangian deformation field. 
+
+Usage: FS_plot_ugrid -i fname.elle -u A B C E D -n
+
+A = Initial orientation of lines, default 0
+    (0 = horizontal 1 = vertical 2 = diagonal 3 = horizontal and vertical, horz. in blue)
+B = Spacing of lines (use integer value), default 1
+C = Scale box by some factor, useful for pure shear simulations with chaning box size
+    default = 7 (works well with 1x1 box and simple shear, 5.8 works well with pure shear (50% shortening)
+D = Threshold distance: Any pair of neighbouring unodes with a separation higher than this will not be 
+    connected by a grid line. The value D = 0.15 appears to work well...
+E = Exclude a phase from drawing by typing phase ID, default 0 = no exclusion
+

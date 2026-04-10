@@ -1,0 +1,84 @@
+
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+#include "../elle.tmpl"
+
+SRCDIR = .
+OBJDIR = .
+#
+SRCS= bflynns.cc nodes.cc nodesP.cc\
+       error.c runopts.cc update.cc\
+       init.c general.cc check.cc\
+       polygon.cc regions.cc file.cc\
+       parseopts.c file_utils.c timefn.c\
+       triattrib.cc crossings.cc lut.cc\
+       attribute.cc attribarray.cc misorient.cc\
+       flynnarray.cc flynns.cc interface.cc\
+       pointdata.cc splitting.cc version.cc\
+       unodes.cc GBMUnodeUpdate.cc display.cc image.cc\
+       segments.cc \
+       erand.cc v2f.cc\
+       $(SSRCD)/statsfns.cc\
+       polyutils.cc gz_utils.cc\
+       tripoly.c mineraldb.c string_utils.c
+
+OBJS1= bflynns.o nodes.o nodesP.o\
+       error.o update.o\
+       init.o general.o check.o\
+       polygon.o regions.o file.o\
+       file_utils.o timefn.o\
+       triattrib.o crossings.o lut.o\
+       statsfns.o string_utils.o\
+       attribute.o attribarray.o misorient.o\
+       flynnarray.o flynns.o interface.o\
+       pointdata.o splitting.o version.o\
+       unodes.o GBMUnodeUpdate.o\
+       segments.o \
+       erand.o v2f.o\
+       polyutils.o gz_utils.o\
+       tripoly.o trilib.o mineraldb.o
+
+OBJSDWX= runopts.o parseopts.o display.o image.o
+OBJSDX= runopts.o parseopts.o display$(XEXT).o image.o
+OBJSB= runoptsb.o parseoptsb.o batchfn.o image.o
+OBJS= $(OBJS1) $(OBJSDX) $(OBJSDWX) $(OBJSB)
+OBJSBASE= $(OBJS1) $(OBJSB)
+
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+SpecialRenameObjectRule(trilib.o,triangle.c,-DTRILIBRARY)
+
+SpecialCplusplusObjectRule(nodes,nodes,-O0 -g)
+
+SpecialRenameCplusplusObjectRule(batchfn.o,display.cc,-DNODISP)
+
+SpecialRenameCplusplusObjectRule(display$(XEXT).o,display.cc,$(P_OPTIONS))
+
+SpecialRenameCplusplusObjectRule(display.o,display.cc,$(WXP_OPTIONS))
+
+SpecialRenameCplusplusObjectRule(runoptsb.o,runopts.cc,-DNODISP)
+
+SpecialRenameObjectRule(parseoptsb.o,parseopts.c,-DNODISP)
+
+SpecialRenameCplusplusObjectRule(statsfns.o,$(SSRCD)/statsfns.cc,$(B_OPTIONS))
+
+MakeLibTarget(elle,_base,$(OBJS1),$(LIBDIR),$(INCLUDES_B),base)
+/*MakeLibTarget(elle,_base,$(OBJSBASE),$(LIBDIR),$(INCLUDES_B),base)*/
+
+MakeLibTarget(elle$(BTCHEXT),$(BASEEXT),$(OBJSB),$(LIBDIR),$(INCLUDES_B),base)
+
+MakeLibTarget(elle$(XEXT),$(BASEEXT),$(OBJSDX),$(LIBDIR),$(INCLUDES_X),base)
+
+MakeLibTarget(elle$(WXEXT),$(WXEXT),$(OBJSDWX),$(LIBDIR),$(INCLUDES_WX),display_wx)
+
+MakeBatch(triangle,$(BTCHEXT),triangle.o,$(BINDIRB))
+
+InstallNamedTarget(install$(XEXT),triangle$(BTCHEXT),NullParameter,$(BINDIRX),triangle)
+
+InstallNamedTarget(install$(WXEXT),triangle$(BTCHEXT),NullParameter,$(BINDIRWX),triangle)
+
+CleanMakefile()

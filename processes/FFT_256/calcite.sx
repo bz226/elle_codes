@@ -1,0 +1,42 @@
+CALCITE LOW TEMPERATURE
+TRI               icryst
+   1.  1. 3.418   crystal axes (cdim(i))
+   4              nmodesx (total # of modes listed in the file)
+   4              nmodes  (# of modes to be used in the calculation)
+   1 2  3 4       mode(i) (label of the modes to be used)
+f-GLIDE
+  1   6   9   1.0   0.   0          modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  1.6  30.0   0.0   0.0   0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0               hselfx,hlatex
+   0  1 -1  2     2  0 -2 -1         f- glide
+   1 -1  0  2     2  0 -2 -1
+  -1  0  1  2    -2  2  0 -1
+   0  1 -1  2    -2  2  0 -1
+   1 -1  0  2     0 -2  2 -1
+  -1  0  1  2     0 -2  2 -1
+r-GLIDE
+  2   3   9   1.0   0.0   0          modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  1.0 30.0   0.0   0.0   0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0            hselfx,hlatex
+   1  0 -1  4     2  0 -2 -1         r- glide
+  -1  1  0  4    -2  2  0 -1
+   0 -1  1  4     0 -2  2 -1
+r+GLIDE
+  3   3   9   1.0   0.0   0          modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  1.6 30.0   0.0   0.0   0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0            hselfx,hlatex
+   1  0 -1  4    -2  0  2  1         r+ glide
+  -1  1  0  4     2 -2  0  1
+   0 -1  1  4     0  2 -2  1
+e+TWINNING
+  4   3  9  1.0  0.0  0.694            modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  0.4 30.0   0.0   0.0   0.0         tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0            hselfx,hlatex
+   0  1 -1  8     0 -4  4  1         e+ twinning
+   1 -1  0  8    -4  4  0  1
+  -1  0  1  8     4  0 -4  1
+
+
+
+
+

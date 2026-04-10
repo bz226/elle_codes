@@ -1,0 +1,36 @@
+--> BEFORE USING THIS SCRIPT: APPLY FS_postprocess_strainanalysis!!
+
+This script reads finite position gradient tensors from ellefile (FS_postprocess_strainanalysis stored the data in U_ATTRIB_A to F) and calculates properties such as: vorticity, vorticity number, min/max strains, stretching direction, ratio of strain ellipse, dilation.
+
+Usage:
+
+FS_plot_strainanalysis -i file.elle -u A B -n
+
+A: Dimension of points that store properties: 128,256 etc., does not have to be the unode dimension, it can be regarded as resolution of plot. The array of points will be in a regular grid of AxA points in case of a 1x1 box, otherwise the number of points in the direction of the long box edge.
+
+DEFAULT: A is unode dim (128,256 etc.)
+
+B: Additionally, the user has the chance to write certain data to a space delimited textfile: This file will have as many rows and columns as the plot point array (so can be plotted as a text-image). Input decides on which data is written to textfile:
+B=0 (default): Do not write any text file
+B=1 - Vorticity
+B=2 - Vorticity number
+B=3 - min strain
+B=4 - max strain
+B=5 - ratio of strain ellipse (max/min)
+B=6 - max. stretching direction relative to pos. x-axis
+B=7 - dilation
+B=8 - ALL these properties (in total 7 text files)
+
+For every point in AxA array, the code searches for the nearest passive marker storing the properties and assigns this property to the point. The following attributes will be occupied:
+
+U_ATTRIB_A: Vorticity
+U_ATTRIB_B: Vorticity number
+U_ATTRIB_C: min strain
+U_ATTRIB_D: max strain
+U_ATTRIB_E: max. stretching direction (angle in degerees relative to positive x-axis, mathematical system for angles)
+U_ATTRIB_F: ratio of strain ellipse (max/min)
+U_VISCOSITY: Dilation, estimate for error as it should be 1 in area conservative deformation
+
+
+HINT: With this script, you can also load the INCREMENTAL data from an Elle file (as producable by FS_postprocess_strainanalysis). However, these will not contain flynn or bnode data, but directly start with "UNODES"-block. If necessary, please add the flynn and bnodes blocks from the corresponding output Elle file
+

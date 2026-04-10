@@ -1,0 +1,324 @@
+float flynn attribs DISLOCDENS, AGE(AGE,CYCLE),
+F_ATTRIB_A, F_ATTRIB_B, F_ATTRIB_C
+
+int flynn attributes F_ATTRIB_I, F_ATTRIB_J, F_ATTRIB_K
+float node attribs N_ATTRIB_F, N_ATTRIB_G, N_ATTRIB_H
+
+unit cell
+
+Time, Temperature, Pressure
+
+crossings,
+
+directed splitting
+
+I put Mark's checks back in to stop triple switches between different 
+minerals etc.
+plus switch which conserves biphase boundary
+Node checks - phase boundary checking needs MINERAL flynn attribute.
+If not active, routines return true for single phase boundary.
+NodeSameMineral sets themin to be NO_NB.
+
+merging
+
+Allow options minflynnarea & maxflynnarea to be used in splitting -
+stop tiny or narrow grains.
+These are also in OPTIONS as a general option for all flynns
+Mineraldb also has attribute CRITICAL_MISORIENT
+
+angle0 in general.c
+
+create new versions of DeleteDoubleJ and flynns.mergeFlynns so that it
+can be done with or without checking
+
+1.1.6
+Changed values in mineraldb for CRITICAL_RX_ENERGY and
+CRITICAL_SG_ENERGY (CRITICAL_RR_ENERGY no longer exists)
+
+Fixed elle2poly.cc to get rid of "I give up". Needed to connect a mirror
+node to a mirror node
+
+Fixed basil - eps too large in vsbcon.f so it was finding 5 corners.
+
+Fixed elle2poly.cc - connecting a node to a corner mirror but it should
+have been the repositioned neighbour (neighbour was at 1,1 - connected
+to 0,0 instead of 0.2,0 (sshear=0.8).
+
+Fixed ElleNodePlotXY - needed while loops, instead of single if
+statement, for repositioning.
+
+1.2
+
+Plotcode - changes to Display Dialog. Inactive attributes greyed out,
+min - max for attributes can be set by the user.
+
+Forced merge was using mineraldb area settings to remove small flynns.
+Changed this to area of triangle, minNodeSep on all sides.
+
+2.0
+
+Hierarchy - changes mainly to processes so they use level rather than
+active attribute. Not all flynns will have an attribute value -
+previously they were all given a default. Alos changes for first node
+and walking around a flynn.
+
+Tidying - got rid of a lot of unused variables.
+
+nodes.cc - Forced triple switch causing seg flt, can't find reason yet
+so building this file with -O0 -g. Problem only occurs on Linux.
+Topo problems reduced if locations written as %.8f. %f was causing
+crossings just by writing and reading. Should save as binary and have a
+conversion routine to write ASCII when required.
+
+New command line option (-u) for entering up to 5 floats. Process can
+define them as required and specify in manual.
+
+EllePhaseBoundary declaration moved to nodes.h (from check.h) and now
+returns unsigned char
+
+elle2poly - needed fix for inserting boundary nodes in skewed unit
+cell. Also problems with case that didn't work on alphas but ok on
+linux. Reading locations from %.8f files, linux read 0.00000295 as is
+but alphas read as 0.000003. Now read as double and cp to float. Also
+changed elle2poly to move pts to xmin, xmax boundaries if very close
+and no deformation of unit cell (may need to fix for deformed unit
+cells)
+
+Imakefiles - typo ".c.o:" (.c .o:) generating warnings - fixed.
+
+Created PS lib in plotcode to build showelleps. Colourmap moved from 
+Settings_run(basecode) to Settings in plotcode. Reads showelle.in on
+startup. New menu options. Display dialog allows setting of min max
+for flynn attributes. These stay constant when new file opened for
+continuity in colours.
+
+2.1
+
+Unconnected nodes
+new files: unodes.h  unodesP.h unodes.cc
+changes to files: file.cc interface.cc flynns.cc flynnarray.cc
+                  display.cc bflynns.cc(call cleanup)
+
+new runoptions Timestep
+
+new convenience fn ElleCoordsPlotXY
+
+Changes to plotcode - unode option, range setting for all plot options.
+                      nodes toggle redundant so replaced by option to
+                      plot unode info as triangulation. This affects any
+                      showelle.in files as line "Nodes = 0/1" is no
+                      longer recognized and need to be replaced by 
+                      "Unode triangulation = 0/1"
+
+Write attributes as 8 decimal place E format 22/01/01
+
+2.1.1
+
+elle/basecode
+display.cc - changes so that the plotcode can use more than 60 plot
+colours.
+interface.cc - changes to routine which creates unodes lists for each
+flynn. Reduced search time for files with many flynns and few
+nodes/flynn.
+runopts.cc runopts.h attrib.h - UserData type
+
+elle/plotcode
+options.c - overlay toggle
+settings.c cmndefs.h options.h settings.h types.h - overlay and increased plot colours
+options.h - more attributes in unode attribute list
+
+elle/processes/gbdiff
+Imakefile gbdiff.main.cc gbdiff.elle.cc - changes so that calcs all in
+double prec, Kappa is the first UserData value, hardwiring of CONC_A
+max, min removed.
+elle/processes/pblast
+.cc files updated for UserData
+.c changed to .cc
+
+
+2.2
+
+changed to DOUBLE PRECISION
+
+call to update unodes added to ElleCrossingsCheck
+
+gbdiff - if stages==0, calculates stages from Timestep and Kappa 
+
+elle_expand - turn off move being prop to area by -u large_no speedup 0
+
+2.3
+
+GBMUnodeUpdate.cc - lots of changes
+nodes.cc, nodesP.cc - changes to allow mass balance for node
+                      concentration attributes
+gbdiff - double loop to allow stages or calculated steps for one stage
+
+manuel - if -v 0.0 (or -v not set) then strainrate defaults to 0.01
+         and it does the requested number of stages
+         (if -s 5, strain =0.05)
+         if strainrate set, uses this value and timestep to calculate
+         velocity and stages is set to 1.
+
+elle2poly.cc - fixed bug which generated poly file with more than one
+               point at a corner position (most often when SSOffset 
+               a multiple of 0.5). Basil stops with message about 
+               finding too many corners.
+
+May '01
+processes/growth/gbe.elle.cc - updated to match code in gbm. Changed 
+               so that it only moved a node if it found a position
+               with lower energy. Previously, moved to the first random
+               position if a lower energy one was not found.
+
+processes/gbm/gbm.elle.cc - bug in checking 4 random directions. Used
+               +-dx, +-dy which gave a bias to positions near the x and
+               y axes (polygons would always end up rectangular)
+
+nodes.cc, crossings.cc - changes to fix topo bugs
+
+check.cc -     ElleNodesSameMineral sets the mineral to QUARTZ if MINERAL
+               attribute not active. Stops gbm breaking with some files.
+
+2.3.2
+triattrib
+unodes      Changes to allow a loop which uses the flynn triangulation
+            to find unode neighbours and alter attributes based on nb 
+            values.
+templates   cleaned up update and file writing routines so they are 
+            called when ElleUpdate is called (usually at end of each
+            stage
+nodes, crossings - trying to sort crossings, esp triple switch node 
+            moves
+
+2.3.3
+nodes.cc crossings.cc ElleReplaceTripleJ puts TJ at each intersection on 
+                      the flynn that is checked (the one that is closing)
+                      Changes to positioning of TJs after switching.
+
+2.3.4
+manuel.elle.cc - fixed so that cell bbox was updated each iteration
+
+gbdiff.elle.cc - fix warning messages. introduce double_kappa
+(user-specified Kappa*2). Scaling changes, calcs done in Elle space.
+Boundary width needs to be adjustable so new run-time opts.
+
+runopts.cc, runopts.h, GBMunodeUpdate.cc - changes for ElleBndWidth().
+
+2.3.5
+GBMunodeUpdate.cc - changed calculation so mass swept is calculated for 
+                    each boundary. Mass to be put back in unodes from 
+                    the boundary is proportional to area swept by bnd.
+triattrib.cc  - Tri pt neighbours are returned in anticlockwise order.
+                May need more work for the pt neighbours of a boundary 
+                node as the function doesn't detect where the polygon 
+                starts and ends ie it should start with the bnd nb for 
+                the polygon boundary.
+                ElleGetTriPtNeighbours() needs a vector of boundary 
+                flags. In the case where on_bnd is set, need to know if 
+                a nb is a unode or bnd node - ids won't determine this.
+nodes           Introduced margin attributes for nodes. These are the 
+                attribute value at the flynn edge at the node position.
+                Therefore, there will be 2 or 3 in positions corres-
+                ponding to the flynn entries.
+                Fixed bug in ElleWriteNodeData. Incrementing too far in 
+                attribute array when writing STRESS, STRAIN. Would have 
+                skipped an attribute which followed these when writing 
+                an Elle file. For runs involving Basil, these attributes
+                have been at the end of the file and therefore at the
+                end of the list.
+flags.c         utilities/convert/basil - renamed flags.c flags.cc so it
+                could include vector header from STL
+
+2.3.6
+GBMunodeUpdate.cc - changed calculation of volume in unode ROI
+examples/workshop - fixed ElleGetTriPtNeighbours (extra param)
+utilities/ps      - added script for batch generation of ps files
+                    batchps
+utilities/view    - added script for batch generation of ps files
+                    batchax
+                    changed plotaxes.main.cc so it can run in bg
+file.cc -  changed filename generation for auto files so the stages 
+           part of the filename is 3 places padded with zeros.
+           Allows them to be listed in order in which they are 
+           created for subsequent processing.
+utilities/convert/ppm - changed unode output to separate attribute
+block. Need to look at values calculated for dummy CONC - too big.
+utilities/shelle   - added function for writing stage variables as 3 
+                     digits, padded with leading zeros to keep filename 
+                     generation consistent with auto files.
+
+2.3.7
+utilities/convert/ppm - ppm2elle.elle.cc changed to reduce number of
+                        colours used
+file.h
+unodes.h
+unodes.cc
+attribarray.cc - changes for unode finite strain attribute U_STRAIN
+                 START_S_X, START_S_Y, PREV_S_X, PREV_S_Y, CURR_S_X,
+                 CURR_S_Y
+                 and for U_ATTRIB_A
+utilities/reposition - checks for unodes so they will also be repositioned
+                       into unit cell
+utilities/convert/basil/data.h
+utilities/convert/basil/Imakefile
+utilities/convert/basil/basil2elle.cc - changes for calculating finite
+                                        strain for unodes
+utilities/convert/basil/lgdef.f
+utilities/convert/basil/c_funcs.cc - functions taken from basil files 
+                                     for lgmesh calculations
+utilities/convert/basil/basil2elle.cc - changed UpdatePosition for nodes
+                        so it used the position from the elle file and 
+                        calculated the new position from the velocity.
+                        Should stop nodes that are moved to the edge of 
+                        the cell by elle2poly being left behind.
+examples/drt2001
+examples/manuel_basil
+examples/basil_tbh  - changed timestep in random.elle so elle-manuel 
+                        could be run for equivalent strain to test
+                        basil and manuel for uniform viscosity microstructure
+                        (basil_shelle run without tbh calculation)
+                      changed sign convention for manuel strain rate
+display.cc
+unodes.cc
+unodes.h - pass TriangulateUnodes the attribute for elements
+examples/workshop - the file fine_gsf.elle was inverted (flynn nodes 
+                    clockwise
+
+2.3.8
+nodes.cc
+basil2elle.cc
+file.cc - added \r to delimiters for strtok. Read errors from elle files
+          which had been thru dos (emailed, written to floppies etc).
+          strtok was returning ptr to '\r' rather than 0.
+
+file.cc - problem with counting of strain values
+splitting.cc - WriteTriangulation was putting the bnd flag on a separate
+               line which was wrong format for showme.
+nodes.cc - put back old version of SwitchTripleNodes and
+        SwitchTripleNodesForced (1.2.2 with updates for recalculating CONC)
+
+changes to help split off display and build batch versions of processes
+with no graphics libs linked
+display.cc - moved PlotUnodes from unodes.cc
+init.c - declared Init_Data() and deleted include for setup.h.
+created batch.cc batch.h to define dummy fns Init_Data (only needed to
+initialise display structures) and those called from file.cc
+batch.cc would replace display.cc in a batch process
+mv StartApp to runopts.cc
+
+not done but need to be resolved
+remove -c option from parseopts.c (refers to Colormaps)
+mv string_utils.h and string_utils.c to basecode (from plotcode)?
+change string_utils.c to include file.h not cmndefs.h - only needs
+definition of COMMENTS
+
+attribarray.cc
+file.cc file.h
+unodes.cc - unode attribute U_EULER_3
+
+plotcode/options.c, options.h
+plotcode/settings.c
+display.cc - allow plotting of triple nodes only
+             allow plotting of unodes without attributes (LOCATION)
+
+replaced atanf, cosf etc  and rand48 fns as they are not std

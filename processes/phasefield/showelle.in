@@ -1,0 +1,22 @@
+orientation         = PORTRAIT
+paper_size          = A4
+font_height         = 12
+page_xmargin        = 0.000
+page_ymargin        = 0.000
+page_scale          = 1.000
+foreground          = 1
+linestyle           = solid
+linewidth           = 1.000
+colour              = standard
+rescale             = 1
+verbose             = 0
+text_bg             = 0
+Update_Interval     =  10
+Overlay_Plot        =  0
+Unode_triangulation =  0
+Flynn_Labels        =  0
+Flynn_Attribute     =  NONE
+Node_Attribute      =  NONE
+Unode_Attribute     =  CONC_A min= 0.000000e+00 max= 1.000000e+00
+Boundary_Attribute  =  NONE
+Boundary_Level      =  1

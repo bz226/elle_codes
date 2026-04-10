@@ -1,0 +1,22 @@
+FS_euler3random
+
+FS_euler3random -i infile.elle -u InUnodes NoiseInFlynns Anisotropy AnisoAlpha AnisoBeta AnisoGamma AnisoNoise AnisoPhase
+
+InUnodes      - If set to 1: Store angles in unodes instead of flynns, default 0 (store in flynns)
+
+NoiseInFlynns - Setting it to anything higher than 0 means adding a noise to otherwise constant LPO within one flynn
+                --> For that purpose the LPO stored in flynns is transferred to unodes to make noise possible
+                ATTETION: Only working if InUnodes == 0 (Even though finally LPO will be stored in unodes)
+
+Anisotropy    - If set to 1: Code will create anisotropic distribution of euler angles with maximum values 
+                defined in the FOUR following input parameters, default: 0 (don't do it)
+
+AnisoAlpha    - Only if Anisotropy==1: Value for euler alpha (noise will be added +- this value)
+
+AnisoBeta     - Only if Anisotropy==1: Value for euler beta (noise will be added +- this value)
+
+AnisoGamma    - Only if Anisotropy==1: Value for euler gamma (noise will be added +- this value)
+
+AnisoNoise    - Only if Anisotropy==1: Values for alpha,beta,gamma will have a noise of +- this value
+
+AnisoPhase    - Only if Anisotropy==1: Only the phase with the ID==AnisoPhase will be used for anisotropic distribution

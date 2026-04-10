@@ -1,0 +1,241 @@
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+#ifndef PREFIX
+PREFIX=/usr/local
+#endif
+
+XCOMM LOCALDIR= $(PREFIX)/bin
+XCOMM LOCALLIB= $(PREFIX)/lib
+XCOMM LOCALMANL= $(PREFIX)/man/manl
+
+/*
+ * build the target from objs using the Fortran compiler
+ */
+#ifndef NormalFortranProgramTarget
+#define NormalFortranProgramTarget(prog,objs,deplibs,loclibs,syslibs) @@\
+prog: objs deplibs                                                 @@\
+	RemoveTargetProgram($@)                                        @@\
+	$(FC) -o $@ objs $(LDOPTIONS) loclibs $(LDLIBS) syslibs \           @@\
+                             $(EXTRA_LOAD_FLAGS)                   @@\
+                                                                   @@\
+                                                                   @@\
+clean::                                                            @@\
+	$(RM) prog
+#endif /*NormalFortranProgramTarget*/
+
+/*
+ * build the object file (obj) from src using the C compiler
+ * obj and src can include paths so may not be in the current
+ * directory or have the same basename
+ */
+#define SpecialRenameObjectRule(obj,src,options)  @@\
+obj: src                                        @@\
+	$(CC) -c $(CFLAGS) options -o obj src
+
+/*
+ * build the object file (obj) from src using the C++ compiler
+ * obj and src can include paths so may not be in the current
+ * directory or have the same basename
+ */
+#define SpecialRenameCplusplusObjectRule(obj,src,options)  @@\
+obj: src                                        @@\
+	$(CXX) -c $(CXXFLAGS) options -o obj src
+
+/*
+ * don't think this works
+ */
+#define FObjCompileRule(srcdir,objdir)          @@\
+.f.o:                                           @@\
+	$(FC) $(FFLAGS) -c -o objdir/$@ srcdir/$<
+
+/*
+ * install exe and create link to it
+ */
+#define InstallAndLinkProgram(progname,destdir,linkname)          @@\
+InstallProgram(progname,destdir)          @@\
+	( cd destdir;				@@\
+	RemoveFile(linkname)                         @@\
+	$(LN) progname linkname )
+
+/*
+ * rename an existing binary by prepending OLD
+ */
+#define PreserveBinary(prog,dir)          @@\
+preserve::                                  @@\
+	if [ -f prog ] ( cd dir; $(MV) prog Concat(OLD,prog) )
+
+/*
+ * Make base executable (no graphics libs)
+ */
+#define MakeBase(name,ext,objs,destdir)          @@\
+base::Concat(name,ext)                              @@\
+INCLUDES= $(INCLUDES_BASE)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_B),$(LOCAL_LIBRARIES_B) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name)
+
+/*
+ * MakeBaseSubdirs - generate rules to recursively make base exes
+ */
+#ifndef NamedMakeBaseSubdirs
+#define NamedMakeBaseSubdirs(name,dirs) \
+NamedTargetSubdirs(name,dirs,"making base executables",NullParameter,name)
+#endif /* NamedMakeBaseSubdirs */
+
+#ifndef MakeBaseSubdirs
+#define MakeBaseSubdirs(dirs) \
+NamedMakeBaseSubdirs(base,dirs)
+#endif
+
+/*
+ * Make batch executable (no graphics libs) and link
+ */
+#define MakeBatchAndLink(name,ext,objs,destdir,linkname)          @@\
+batch::Concat(name,ext)                              @@\
+INCLUDES= $(INCLUDES_B)                       @@\
+DEPENDFLAGS= $(INCLUDES_B)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_B),$(LOCAL_LIBRARIES_B) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	( cd destdir; \ @@\
+	RemoveFile(./linkname); \ @@\
+	$(LN) ./name ./linkname; ) @@\
+	DependTarget()
+
+
+/*
+ * Make batch executable (no graphics libs)
+ */
+#define MakeBatch(name,ext,objs,destdir)          @@\
+batch::Concat(name,ext)                              @@\
+INCLUDES= $(INCLUDES_B)                       @@\
+DEPENDFLAGS= $(INCLUDES_B)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_B),$(LOCAL_LIBRARIES_B) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	DependTarget()
+
+/*
+ * MakeBatchSubdirs - generate rules to recursively make batch exes
+ */
+#ifndef NamedMakeBatchSubdirs
+#define NamedMakeBatchSubdirs(name,dirs) \
+NamedTargetSubdirs(name,dirs,"making batch executables",NullParameter,name)
+#endif /* NamedMakeBatchSubdirs */
+
+#ifndef MakeBatchSubdirs
+#define MakeBatchSubdirs(dirs) \
+NamedMakeBatchSubdirs(batch,dirs)
+#endif
+
+/*
+ * Make display wx/gl executable and link
+ */
+#define MakeDisplayWXAndLink(name,ext,objs,destdir,linkname)          @@\
+display_wx::Concat(name,ext)                            @@\
+INCLUDES = $(INCLUDES_WX)                       @@\
+DEPENDFLAGS = $(INCLUDES_WX)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_WX),$(LOCAL_LIBRARIES_WX) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	( cd destdir; \ @@\
+	RemoveFile(./linkname); \ @@\
+	$(LN) ./name ./linkname; ) @@\
+	DependTarget()
+
+/*
+
+/*
+ * Make display wx/gl executable
+ */
+#define MakeDisplayWX(name,ext,objs,destdir)          @@\
+display_wx::Concat(name,ext)                            @@\
+INCLUDES = $(INCLUDES_WX)                       @@\
+DEPENDFLAGS = $(INCLUDES_WX)                       @@\
+DEPENDFLAGS= $(INCLUDES_WX)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_WX),$(LOCAL_LIBRARIES_WX) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	DependTarget()
+
+/*
+ * MakeDisplayWXSubdirs - generate rules to recursively make wx exes
+ */
+#ifndef NamedMakeDisplayWXSubdirs
+#define NamedMakeDisplayWXSubdirs(name,dirs) \
+NamedTargetSubdirs(name,dirs,Concat("making executables for binwx",name),NullParameter,name)
+#endif /* NamedMakeDisplaySubdirs */
+
+#ifndef MakeDisplayWXSubdirs
+#define MakeDisplayWXSubdirs(dirs) \
+NamedMakeDisplayWXSubdirs(display_wx,dirs)
+#endif
+
+
+/*
+ * Make display X11/motif executable and link
+ */
+#define MakeDisplayXAndLink(name,ext,objs,destdir,linkname)          @@\
+display_x::Concat(name,ext)                            @@\
+INCLUDES = $(INCLUDES_X)                       @@\
+DEPENDFLAGS = $(INCLUDES_X)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_X),$(LOCAL_LIBRARIES_X) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	( cd destdir; \ @@\
+	RemoveFile(./linkname); \ @@\
+	$(LN) ./name ./linkname; ) @@\
+	DependTarget()
+
+/*
+ * Make display X11/motif executable
+ */
+#define MakeDisplayX(name,ext,objs,destdir)          @@\
+display_x::Concat(name,ext)                            @@\
+INCLUDES = $(INCLUDES_X)                       @@\
+DEPENDFLAGS = $(INCLUDES_X)                       @@\
+	NormalCplusplusProgramTarget(Concat(name,ext),objs,$(DEPLIBS_X),$(LOCAL_LIBRARIES_X) $(EXTRA_LIBS),NullParameter) @@\
+	InstallNamedTarget(Concat(install,ext),ProgramTargetName(Concat(name,ext)),NullParameter,destdir,name) @@\
+	DependTarget()
+
+/*
+ * MakeDisplaySubdirs - generate rules to recursively make display exes
+ */
+#ifndef NamedMakeDisplayXSubdirs
+#define NamedMakeDisplayXSubdirs(name,dirs) \
+NamedTargetSubdirs(name,dirs,Concat("making executables for binx",name),NullParameter,name)
+#endif /* NamedMakeDisplayXSubdirs */
+
+#ifndef MakeDisplayXSubdirs
+#define MakeDisplayXSubdirs(dirs) \
+NamedMakeDisplayXSubdirs(display_x,dirs)
+#endif
+
+/*
+ * Make target lib
+ */
+#define MakeLibTarget(name,ext,objs,destdir,incl,target)          @@\
+target:: LibraryTargetName(name)                      @@\
+INCLUDES= incl                      @@\
+DEPENDFLAGS= incl                    @@\
+	NormalLibraryTarget(name,objs) @@\
+Concat(install,ext):: LibraryTargetName(name)                @@\
+	MakeDir($(DESTDIR)destdir)                @@\
+	$(INSTALL) $(INSTALLFLAGS) $(INSTLIBFLAGS) LibraryTargetName(name) $(DESTDIR)destdir @@\
+	RanLibrary($(RANLIBINSTFLAGS) $(DESTDIR)destdir/LibraryTargetName(name)) @@\
+	DependTarget()
+
+/*
+ * clean Makefiles for cvs
+ */
+#define CleanMakefile()          @@\
+cleanmk::                                  @@\
+	$(RM) Makefile
+/*
+ * CleanmkSubdirs - generate rules to recursively clean out Makefiles.
+ */
+#ifndef NamedCleanmkSubdirs
+#define NamedCleanmkSubdirs(name,dirs) \
+NamedTargetSubdirs(name,dirs,"cleaning Makefile",NullParameter,cleanmk)
+#endif /* NamedCleanmkSubdirs */
+
+#ifndef CleanmkSubdirs
+#define CleanmkSubdirs(dirs) \
+NamedCleanmkSubdirs(cleanmk,dirs)
+#endif

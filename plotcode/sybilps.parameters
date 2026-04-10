@@ -1,0 +1,43 @@
+C*--------------------------------------------------------------------
+C*    Basil / Sybil:   sybilps.params  1.1  1 October 1998
+C*
+C*    Copyright (c) 1997 by G.A. Houseman, T.D. Barr, & L.A. Evans
+C*    See README file for copying and redistribution conditions.
+C*--------------------------------------------------------------------
+
+      PARAMETER ( PTSPERCM=28.34646 )
+C
+C   These definitions must match those in cmndefs.h
+C   Array indices will be offset by 1 from those in the C files
+C
+
+      PARAMETER ( DEFAULTWIDTH=197.0)
+      PARAMETER ( DEFAULTHEIGHT=284.0)
+
+      PARAMETER ( PENDN=2)
+      PARAMETER ( PENUP=3)
+
+      PARAMETER ( DFLTFNT=14)
+
+      PARAMETER ( JCENTRE=0)
+      PARAMETER ( JBASE = 1)
+      PARAMETER ( JTOP =  2)
+      PARAMETER ( JLEFT = 1)
+      PARAMETER ( JRIGHT= 2)
+      PARAMETER ( TICNONE = 3)
+
+C  pwindo indices
+      PARAMETER ( XINIT = 1)
+      PARAMETER ( YINIT = 2)
+      PARAMETER ( XMIN  = 3)
+      PARAMETER ( XMAX  = 4)
+      PARAMETER ( YMIN  = 5)
+      PARAMETER ( YMAX  = 6)
+      PARAMETER ( BXWD  = 7)
+      PARAMETER ( BXHT  = 8)
+      PARAMETER ( DUM   = 9)
+      PARAMETER ( XCMIN = 10)
+      PARAMETER ( XCMAX = 11)
+      PARAMETER ( YCMIN = 12)
+      PARAMETER ( YCMAX = 13)
+      PARAMETER ( IPWINDOWENTRIES = 13)

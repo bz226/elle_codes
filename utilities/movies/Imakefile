@@ -1,0 +1,14 @@
+#include "../../elle.tmpl"
+
+
+THISAPP1= batch_elle_movie
+THISAPP2= batch_basil_movie
+THISAPP3= ellemoviemaker.sh
+
+
+InstallTarget(install$(XEXT),$(THISAPP1),NullParameter,$(BINDIRX))
+InstallTarget(install$(BASEEXT),$(THISAPP2),NullParameter,$(BINDIRB))
+InstallTarget(install$(WXEXT),$(THISAPP3),NullParameter,$(BINDIRWX))
+
+CleanMakefile()
+

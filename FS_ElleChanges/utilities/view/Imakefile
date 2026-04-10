@@ -1,0 +1,42 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS1=  show.main.cc show.elle.cc
+OBJS1=  show.main.o show.elle.o
+SRCS2=  plotaxes.main.cc plotaxes.elle.cc
+OBJS2=  plotaxes.main.o plotaxes.elle.o
+
+SRCS= $(SRCS1) $(SRCS2)
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+THISAPP1=showelle
+THISAPP2=plotaxes
+THISAPP3=batchax
+
+.SUFFIXES: .cc .o
+	 NormalCplusplusObjectRule()
+
+
+MakeDisplayWX($(THISAPP1),$(WXEXT),$(OBJS1),$(BINDIRWX))
+
+MakeDisplayX($(THISAPP1),$(XEXT),$(OBJS1),$(BINDIRX))
+
+MakeBatch($(THISAPP2),$(BTCHEXT),$(OBJS2),$(BINDIRB))
+InstallNamedTarget(install$(XEXT),Concat($(THISAPP2),$(BTCHEXT)),NullParameter,$(BINDIRX),$(THISAPP2))
+InstallNamedTarget(install$(WXEXT),Concat($(THISAPP2),$(BTCHEXT)),NullParameter,$(BINDIRWX),$(THISAPP2))
+
+InstallTarget(install$(BASEEXT),$(THISAPP3),NullParameter,$(BINDIRB))
+InstallTarget(install$(XEXT),$(THISAPP3),NullParameter,$(BINDIRX))
+InstallTarget(install$(WXEXT),$(THISAPP3),NullParameter,$(BINDIRWX))
+
+CleanMakefile()

@@ -1,0 +1,23 @@
+/* XPM */
+static const char *markrow[]={
+"16 16 4 1",
+". c None",
+"a c #000000",
+"# c #a0a0a0",
+"b c #c0c000",
+".#.#.a..........",
+".#.#.a..........",
+".###.a..........",
+"aaaaaaaaaaaaaaaa",
+"bb#bbabbbbbbbbbb",
+"b##bbabbbbbbbbbb",
+"bb#bbabbbbbbbbbb",
+"bb#bbabbbbbbbbbb",
+"aaaaaaaaaaaaaaaa",
+"b##bbabbbbbbbbbb",
+"bb#bbabbbbbbbbbb",
+"b#bbbabbbbbbbbbb",
+"b##bbabbbbbbbbbb",
+"aaaaaaaaaaaaaaaa",
+".###.a..........",
+"...#.a.........."};

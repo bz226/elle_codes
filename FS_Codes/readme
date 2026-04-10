@@ -1,0 +1,17 @@
+To install these codes, copy to your elle directory (elle/elle The same folder that also contains the folders "processes/" or "basecode/").
+
+To install, use FS_install.sh:
+
+chmod +x FS_install.sh
+FS_install.sh
+
+Attention: The codes in "FS_other/" are NOT installed with this operation. To install them, or re-compile other codes, go to the corresponding directory containing the Imakefile. If the Makefile is not created yet, create it from the Imakefile by typing:
+
+xmkmf
+
+Afterwards compile (or re-compile) your code with the commands:
+
+make install_wx
+make clean
+
+ALL codes will be installed in "elle/elle/binwx/". Change the Imakefiles if you wish to install them anywhere else.

@@ -1,0 +1,197 @@
+#!/bin/sh
+
+#------------------------------------------------------------------
+#
+#	BASIL Movie Making shell script:
+#           
+#	Creates BASIL raster overlain by Elle grain boundaries
+#
+#	Assumes a shelle script was used to run experiment
+#
+#
+#	TIME 		=  time of first frame (inclusive)
+#	LASTTIME 	=  time of first frame (inclusive)
+#	TIMESTEP 	=  interval between frames
+#	ROOTNAME	=  root of experiment name
+#	PROCESS 	=  process id of elle file immediately prior to 
+#						   BASIL calculation
+#	PROPERTY	=  name of attibute ot be plotted in sybil (see end of file)
+#	MIN			=  minimum value fo PARAMETER for LUT
+#	MAX			=  maximum value fo PARAMETER for LUT
+#
+#	To modify BASIL raster properties, edit HEADER1
+#   
+#   Common Sybil PARAMETER names are listed at end of this file
+#
+#	REQUIRES ImageMagick!
+#
+#	This script will vreate a sequence of tiff files tha can be turned
+#	into a single animaed gif using the command;
+#	
+#	convert *.tif filename.gif
+#
+#	hacked from shelle script mwj 3/07/2003
+#------------------------------------------------------------------
+
+DEBUG= #for running
+#DEBUG=echo #for debugging
+
+TIME=1
+LASTTIME=5
+TIMESTEP=1
+ROOTNAME=gc2
+ERROR=0
+PROCESS=16
+PROPERTY=Strain.psr1
+MIN=0.0
+MAX=2.0
+SOLDIR='FD.sols/'
+
+case $# in
+1)  ROOTNAME=$1;; # root filename
+2)  ROOTNAME=$1; PROCESS=$2;;
+3)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3;;
+4)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3; TIMESTEP=$4;;
+5)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3; TIMESTEP=$4; PROPERTY=$5;;
+6)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3; TIMESTEP=$4; PROPERTY=$5; MIN=$6;;
+7)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3; TIMESTEP=$4; PROPERTY=$5; MIN=$6; MAX=$7;;
+*)  echo 'Usage: batch_basil_movie experiment_name [process_id=16] [lasttime=5] [timestep=1]  [property=Strain.prs1]  [min=0]  [max=2] (requires ImageMagick)' 1>&2; exit 2;; # no args
+esac
+
+
+
+HEADER1='Options   orientation=LANDSCAPE paper_size=A4 mark_cell=1 
+          rows= 1 columns= 1 font_height=12 xmargin=  0.15 
+          ymargin=  0.10 page_xmargin=  0.00 page_ymargin=  0.00 
+          page_scale=  1.00 zoom=  1.00 tl0=100.00 rhoc= 2.900 
+          rhom= 3.300 z0=160.000 tmax= 2.500 elev0= 0.250 
+          bgam0= 0.072 bgam1= 0.139 ndivr= 20.0 s0=  0.0 
+          dels= 0.025 delom=10.000 nx3=  300 mp= 4 mpe= 6 
+          np= 4 contour_plot=shade profile_pts=  51 flip= 0 
+          dble= 0 label= 0 stipple= 0 solution_rot= 0 
+          foreground=  0 linestyle=solid linewidth=  0.5 
+          colour=standard bar=none visc_min=  0.00 
+          visc_max=  0.00 verbose= 0 elle= 1 ticmarks=external 
+Title     ""
+Locate    0	0
+'
+
+HEADER2='Data_In   1	0
+Contour   '$PROPERTY'
+          cntr.colour min='$MIN' max='$MAX' scale=1.000000 bar=none
+'
+
+
+if [ `expr $TIME \< 10` -gt 0 ]
+then
+    TIME=0$TIME
+fi
+if [ `expr $TIME \< 100` -gt 0 ]
+then
+    TIME=0$TIME
+fi
+echo TIME=$TIME
+
+
+$DEBUG echo $HEADER1 > footer0.inc
+ALL=$SOLDIR$ROOTNAME.001
+$DEBUG echo File $ALL > footer1.inc
+$DEBUG echo $HEADER2 > footer2.inc
+ALL=$ROOTNAME.000.00.elle
+$DEBUG echo XYPlot Elle $ALL > footer3.inc
+
+$DEBUG cat footer0.inc footer1.inc footer2.inc footer3.inc > $ROOTNAME.001.log
+$DEBUG sybilps -i $ROOTNAME.001.log
+$DEBUG convert -crop 0x0 -rotate 90 $ROOTNAME.001.ps $ROOTNAME.001.tif
+
+while [ $TIME -lt $LASTTIME -a $ERROR -eq 0 ]
+do
+# update time variable
+   TIME=`expr $TIME + $TIMESTEP`
+   if [ `expr $TIME \< 10` -gt 0 ]
+   then
+    TIME=0$TIME
+   fi
+   if [ `expr $TIME \< 100` -gt 0 ]
+   then
+    TIME=0$TIME
+   fi
+   echo TIME=$TIME
+   TIME1=`expr $TIME - 1 `
+
+
+   if [ `expr $TIME1 \< 10` -gt 0 ]
+   then
+    TIME1=0$TIME1
+   fi
+   if [ `expr $TIME1 \< 100` -gt 0 ]
+   then
+    TIME1=0$TIME1
+   fi
+
+   $DEBUG echo $HEADER1 > footer0.inc
+ALL=$SOLDIR$ROOTNAME.$TIME
+   $DEBUG echo File $ALL > footer1.inc
+   $DEBUG echo $HEADER2 > footer2.inc
+ALL=$ROOTNAME.$TIME1.$PROCESS.elle
+   $DEBUG echo XYPlot Elle $ALL > footer3.inc
+
+   $DEBUG cat footer0.inc footer1.inc footer2.inc footer3.inc > $ROOTNAME.$TIME.log
+   $DEBUG sybilps -i $ROOTNAME.$TIME.log
+   $DEBUG convert -crop 0x0 -rotate 90 $ROOTNAME.$TIME.ps $ROOTNAME.$TIME.tif
+   $DEBUG rm -f  $ROOTNAME.*.ps
+
+done
+
+   $DEBUG rm -f footer*.inc $ROOTNAME.*.log
+   #$DEBUG  convert -loop 1000 $ROOTNAME.*.gif all.$ROOTNAME.gif
+   #$DEBUG rm -f $ROOTNAME.*.gif
+
+exit $ERROR
+
+#-------------------------------------------------------------------------------------------------
+#
+#	Common Sybil PARAMETER names
+#
+#          Velocity.Ux 			x-component of velocity
+#          Velocity.Uy 			y component of velocity
+#          Velocity.Ur 			radial  component  of  velocity  (relative  to local origin)
+#          Velocity.Uth 		tangential component of velocity
+#
+#          Strain.edxx			the xx-component of strain-rate
+#          Strain.edyy 			the yy-component of strain-rate
+#          Strain.edzz 			the zz-component of strain-rate
+#          Strain.edxy 			the xy-component of strain-rate
+#          Strain.psr1 			maximum principal strain-rate in x-y plane
+#          Strain.psr2 			minimum principal strain-rate in x-y plane
+#          Strain.msst 			maximum shear strain-rate in the x-y plane
+#          Strain.cang 			orientation of principal compressional axis
+#          Strain.tang 			orientation of principal extensional axis
+#          Strain.sang 			orientation of direction of maximum shear
+#          Strain.dblc 			parameter that indicates type of faulting
+#          Strain.vort 			vertical component of vorticity
+#          Strain.ed2i 			2nd invariant of the strain-rate tensor
+#          Strain.vota 			ratio of vorticity to shear strain-rate
+#
+#          Stress.taud 			direction of maximum deviatoric stress
+#          Stress.taum 			maximum deviatoric shear stress
+#          Stress.taxx 			the xx component of deviatoric stress
+#          Stress.tayy 			the yy-component of deviatoric stress
+#          Stress.tazz 			the zz-component of deviatoric stress
+#          Stress.taxy 			the xy-component of deviatoric stress
+#          Stress.tau1 			maximum principal deviatoric stress
+#          Stress.tau2 			minimum principal deviatoric stress
+#          Stress.sixx 			the xx-component of total stress
+#          Stress.siyy 			the yy-component of total stress
+#          Stress.sizz 			the zz-component of total stress
+#          Stress.sig1 			maximum principal total stress
+#          Stress.sig2 			minimum principal total stress
+#          Stress.thdi 			thermal dissipation function (stress*strain-rate)
+#          Stress.pres 			the pressure field
+#          Stress.brit 			parameter indicating type of faulting
+#          Stress.bri2 			parameter indicating type of faulting
+#          Stress.visc 			effective viscosity parameter
+#
+#-------------------------------------------------------------------------------------------------
+
+

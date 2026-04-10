@@ -1,0 +1,17 @@
+#!/bin/sh
+case $# in
+1)  r=$1;; # root filename
+2)  r=$1; n=.$2;;
+*)  echo 'Usage: batchps experiment_name [process_number]' 1>&2; exit 2;; # no args
+esac
+
+if test -f $r.000.00.elle
+then
+    showelleps -i $r.000.00.elle
+fi
+for i in $r*$n.elle
+do
+    echo "showelleps -i $i"
+    showelleps -i $i
+done
+

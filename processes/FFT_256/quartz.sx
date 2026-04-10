@@ -1,0 +1,46 @@
+QUARTZ
+HEX                             icryst
+1.  1.  1.1                     cdim(i)
+4                               nmodesx
+4                               nmodes
+1  2  3  4                      mode(i)
+BASAL
+  1   3   20   1.0   0.0   0    modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  1.0  1.0   0.0   0.0   0.0    tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0       hselfx,hlatex
+ 0  0  0  1     2 -1 -1  0
+ 0  0  0  1    -1  2 -1  0      
+ 0  0  0  1    -1 -1  2  0
+PRISMATIC
+  2   3   20   1.0   0.0   0    modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  0.4  0.4   0.0   0.0   0.0    tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0       hselfx,hlatex
+ 1  0 -1  0    -1  2 -1  0
+ 0 -1  1  0     2 -1 -1  0      
+-1  1  0  0    -1 -1  2  0
+PYRAMIDAL<a>
+  3   6   20   1.0   0.0   0    modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  3.0  3.0   0.0   0.0   0.0    tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0       hselfx,hlatex      
+ 1  0 -1  1    -1  2 -1  0    
+ 0 -1  1  1     2 -1 -1  0     
+-1  1  0  1    -1 -1  2  0     
+-1  0  1  1    -1  2 -1  0     
+ 0  1 -1  1     2 -1 -1  0     
+ 1 -1  0  1     1  1 -2  0
+PYRAMIDAL<c+a>
+  4   12   20   1.0   0.0   0   modex,nsmx,nrsx,gamd0x,twshx,isectwx
+  6.0  6.0   0.0   0.0   0.0    tau0xf,tau0xb,tau1x,thet0,thet1
+  0.0  0.0  0.0  0.0  0.0       hselfx,hlatex 
+ 1  0 -1  1    -1 -1  2  3
+ 1  0 -1  1    -2  1  1  3      
+ 0 -1  1  1     1  1 -2  3      
+ 0 -1  1  1    -1  2 -1  3      
+-1  1  0  1     2 -1 -1  3      
+-1  1  0  1     1 -2  1  3      
+-1  0  1  1     2 -1 -1  3      
+-1  0  1  1     1  1 -2  3      
+ 0  1 -1  1    -1 -1  2  3      
+ 0  1 -1  1     1 -2  1  3      
+ 1 -1  0  1    -2  1  1  3      
+ 1 -1  0  1    -1  2 -1  3      

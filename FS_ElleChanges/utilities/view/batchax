@@ -1,0 +1,31 @@
+#!/bin/sh
+case $# in
+1)  r=$1;; # root filename
+2)  r=$1; n=.$2;;
+*)  echo 'Usage: batchps experiment_name [process_number]' 1>&2; exit 2;; # no args
+esac
+
+batch_exists=0
+if test -f plotaxes_b
+then
+	batch_exists=1
+fi
+if test -f $r.000.00.elle 
+then
+	if batch_exists -eq 1
+	then
+    	plotaxes_b -i $r.000.00.elle -s 1 -f 1
+	else
+    	plotaxes -i $r.000.00.elle -s 1 -f 1 -n
+	fi
+fi
+for i in $r*$n.elle
+do
+	if batch_exists -eq 1
+	then
+    	plotaxes_b -i $i -s 1 -f 1
+	else
+    	plotaxes -i $i -s 1 -f 1 -n
+	fi
+done
+

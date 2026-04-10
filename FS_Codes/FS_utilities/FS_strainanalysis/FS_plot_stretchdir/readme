@@ -1,0 +1,16 @@
+Plot stretching direction as lines for every n-th unode in the direction of max. stretching
+
+Usage:
+FS_plot_stretchdir -i file.elle -u A B C D E -n
+
+A: Spacing of unodes (plot data for every A-th unode), default = 1
+B: Maximum length of a line (for 1x1 box simple shear approx 0.01-0.02 seems fine)
+C: Min. strain ellipse ratio (will have line length = 0) Default 1 (this option is switched off)
+D: Max. strain ellipse ratio (will have line length = B (max. line length)) Default 1
+E: Scale the file by a certain factor, useful to fit pure shear box on canvas. Default: 7 (which is useful for simple shear)
+
+HINT: If C and D are the same or C<D, the line lengths are always set to max. length (Which is the case using default input)
+
+file.elle should be the result file of using FS_plot_strainanalysis
+
+--> To store final .ps file in another folder, change line 58 in .cc file

@@ -1,0 +1,14 @@
+This is a new version of fft2elle by Florian Steinbach
+
+The main difference is that it computes incremental strain tensors to calculate new passive maker and bnode positions. These tensors can be used with the other "strain-analysis" codes by Florian to calculate finite strain tensors and properties such as vorticity, strain ellipse data, dilation etc.
+
+Apart from this, this version of fft2elle is based on FS_fft2elle
+
+Usage:
+
+FS_fft2elle_strainanalysis -i file.elle -u A B -n
+
+A: Read dislocation densities into file (1=yes, 0=no, default: 0)
+B: Write strain tensor to text-file (1=yes, 0=no, default: 0)
+
+Please notice that the output Elle file has a different name now: FS_fft2elle_strainanalysis.elle

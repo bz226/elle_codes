@@ -1,0 +1,24 @@
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  checkangle.elle.cc
+OBJS=  checkangle.elle.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+
+THISAPP=checkangle
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+MakeBase($(THISAPP),$(BASEEXT),$(OBJS),$(BINDIRB))
+InstallNamedTarget(install$(XEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRX),$(THISAPP))
+InstallNamedTarget(install$(WXEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRWX),$(THISAPP))
+
+CleanMakefile()

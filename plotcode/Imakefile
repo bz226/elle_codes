@@ -1,0 +1,38 @@
+
+#include "../elle.tmpl"
+
+#ifndef XCOMM
+#define XCOMM #
+#endif
+
+SRCDIR = .
+OBJDIR = .
+
+DFLAGS = -DXSYB
+#
+DSRCS= plot.c xpak.c menus.c\
+       setup.c options.c csettings.c\
+       stats_opts.c string_utils.c settings.cc
+
+DOBJS= plot.o xpak.o menus.o\
+       setup.o options.o csettings.o\
+       stats_opts.o string_utils.o settings.o
+
+PSRCS= lppak.f page.c setup.c settings.cc\
+       csettings.c string_utils.c
+
+POBJS= lppak.o page.o setupps.o settingsps.o\
+       csettingsps.o string_utils.o
+
+SRCS= $(DSRCS) $(PSRCS)
+DEFINES= $(DFLAGS)
+
+SpecialRenameObjectRule(setupps.o,setup.c,-UXSYB)
+SpecialRenameCplusplusObjectRule(settingsps.o,settings.cc,-UXSYB)
+SpecialRenameObjectRule(csettingsps.o,csettings.c,-UXSYB)
+SpecialObjectRule(page.o,page.c,-UXSYB)
+
+MakeLibTarget(ps,$(BASEEXT),$(POBJS),$(LIBDIR),$(INCLUDES_BASE),base)
+MakeLibTarget(plot$(XEXT),$(XEXT),$(DOBJS),$(LIBDIR),$(INCLUDES_X),display_x)
+
+CleanMakefile()

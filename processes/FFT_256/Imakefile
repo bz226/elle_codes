@@ -1,0 +1,18 @@
+
+#include "../../elle.tmpl"
+
+SRCS=   PPC15E-9.02.FOR
+OBJS=   PPC15E-9.02.o
+
+THISAPP=FFT_vs256
+
+.SUFFIXES: .FOR .o
+.FOR.o:
+	$(RM) $@
+		$(FC) -c $(FCFLAGS) $*.FOR
+NormalFortranProgramTarget($(THISAPP),$(OBJS),NullParameter,NullParameter,NullParameter)
+InstallTarget(install$(BTCHEXT),$(THISAPP),NullParameter,$(BINDIRB))
+InstallTarget(install$(WXEXT),$(THISAPP),NullParameter,$(BINDIRWX))
+InstallTarget(install$(XEXT),$(THISAPP),NullParameter,$(BINDIRX))
+
+CleanMakefile()

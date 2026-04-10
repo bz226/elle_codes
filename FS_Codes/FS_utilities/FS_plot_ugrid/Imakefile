@@ -1,0 +1,41 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+/* ********** CHANGE THE NEXT 5 LINES TO SUIT YOUR SYSTEM AND APPLICATION ********** */
+
+#include "../../../elle.tmpl"
+
+TOP = ../../../  /* location of the elle library code, sometime also called "LOCAL" */
+SRCS=  FS_plot_ugrid.cc 
+OBJS=  FS_plot_ugrid.o 
+THISAPP=FS_plot_ugrid
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+    NormalCplusplusObjectRule()
+
+/* ********** SPECIFY WHERE AND WHICH TYPE OF THE EXECUTABLE SHOULD BE INSTALLED ********** */
+
+/*INSTALLDIR=.*/ /*This means the executable is installed in the directory with the relevant source code*/
+INSTALLDIR=$(BINDIRWX) /*This means the executable is installed in binwx folder in the elle structure */
+
+/* IF YOU WANT TO INSTALL A VERSION WITH NO GUI UNCOMMENT THE FOLLOWING 2 LINES (AND COMMENT THE ONES BELOW) */
+
+MakeBase($(THISAPP),$(BASEEXT),$(OBJS),$(BINDIRB))
+InstallNamedTarget(install$(WXEXT),$(THISAPP)$(BASEEXT),NullParameter,$(INSTALLDIR),$(THISAPP))
+
+/* IF YOU WANT TO INSTALL A DISPLAYABLE VERSION UNCOMMENT THE FOLLOWING 2 LINES (AND COMMENT THE ONES ABOVE)*/
+
+/*MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))*/
+/*MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(INSTALLDIR))*/
+
+CleanMakefile()

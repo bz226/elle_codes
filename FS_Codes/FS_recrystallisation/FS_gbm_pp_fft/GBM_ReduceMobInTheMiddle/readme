@@ -1,0 +1,5 @@
+This is the same than the "regular" GBM code, but:
+
+We are able to reduce the mobility in the middle of the modelling box by a factor that should be the input F in GBM process:
+
+-u A B C D E F -n

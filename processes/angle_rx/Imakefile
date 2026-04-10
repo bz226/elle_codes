@@ -1,0 +1,32 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+/* change the next 4 lines to suit your application */
+LOCAL = /usr/local/elle   /* location of the elle library code */
+SRCS=  angle_rx.main.cc angle_rx.elle.cc/* source files for your code */
+OBJS=  angle_rx.main.o angle_rx.elle.o/* object files for your code */
+THISAPP= elle_angle_rx                      /* the name of your executable */
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

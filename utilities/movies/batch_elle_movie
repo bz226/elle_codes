@@ -1,0 +1,76 @@
+#!/bin/sh
+
+#------------------------------------------------------------------
+#
+#   Movie Making shell script:
+#           
+#   Creates Elle grain boundaries
+#
+#	Assumes a shelle script was used to run experiment
+#
+#	TIME 		=  time of first frame (inclusive)
+#	LASTTIME 	=  time of first frame (inclusive)
+#	TIMESTEP 	=  interval between frames
+#	ROOTNAME	=  root of experiment name
+#	PROCESS 	=  process id of elle file to be displayed
+#
+#	To modify Elle image properties, edit showelle.in
+#
+#	REQUIRES ImageMagick!
+#
+#	This script will vreate a sequence of tiff files tha can be turned
+#	into a single animaed gif using the command;
+#	
+#	convert *.tif filename.gif
+#	
+#
+#	hacked from shelle script mwj 3/07/2003
+#------------------------------------------------------------------
+
+
+DEBUG= #for running
+#DEBUG=echo #for debugging
+
+TIME=0
+LASTTIME=5
+TIMESTEP=1
+ROOTNAME=reaction
+ERROR=0
+PROCESS=16
+
+case $# in
+1)  ROOTNAME=$1;; # root filename
+2)  ROOTNAME=$1; PROCESS=$2;;
+3)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3;;
+4)  ROOTNAME=$1; PROCESS=$2; LASTTIME=$3; TIMESTEP=$4;;
+*)  echo 'Usage: batch_elle_movie experiment_name [process_id=16] [lasttime=5] [timestep=1] (requires ImageMagick) ' 1>&2; exit 2;; # no args
+esac
+
+echo TIME=$TIME
+
+$DEBUG showelleps -i $ROOTNAME.000.00.elle
+$DEBUG convert -crop 0x0 $ROOTNAME.000.00.ps $ROOTNAME.000.00.tif
+
+while [ $TIME -lt $LASTTIME -a $ERROR -eq 0 ]
+do
+# update time variable
+   TIME=`expr $TIME + $TIMESTEP`
+   if [ `expr $TIME \< 10` -gt 0 ]
+   then
+    TIME=0$TIME
+   fi
+   if [ `expr $TIME \< 100` -gt 0 ]
+   then
+    TIME=0$TIME
+   fi
+   echo TIME=$TIME
+
+
+   $DEBUG showelleps -i $ROOTNAME.$TIME.$PROCESS.elle
+   $DEBUG convert -crop 0x0 $ROOTNAME.$TIME.$PROCESS.ps $ROOTNAME.$TIME.$PROCESS.tif
+done
+
+$DEBUG rm -f  $ROOTNAME.*.*.ps
+#convert -loop 1000 $ROOTNAME.*.*.tif all.$ROOTNAME.tif
+#rm -f $ROOTNAME.*.*.tif
+exit $ERROR

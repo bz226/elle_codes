@@ -1,0 +1,19 @@
+
+#include "../../elle.tmpl"
+
+THISAPP=lattestart
+XRCEXT=.xrc
+
+SRCS= $(THISAPP).cpp myframe.cpp userdat.cpp wizardsetfunc.cpp wizardrunfunc.cpp wizardstat.cpp wizardname.cpp newfile.cpp externalprocess.cpp editfile.cpp latticegas.cpp
+OBJS= $(THISAPP).o myframe.o userdat.o wizardsetfunc.o wizardrunfunc.o wizardstat.o wizardname.o newfile.o externalprocess.o editfile.o latticegas.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+.SUFFIXES: .cpp .o
+	NormalCplusplusObjectRule()
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+InstallTarget(install$(WXEXT),Concat($(THISAPP),$(XRCEXT)),NullParameter,$(BINDIRWX))
+
+CleanMakefile()

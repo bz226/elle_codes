@@ -1,0 +1,42 @@
+Actually not only doing what is classically called "nucleation", but creating new high angle grain boundaries (HAGBs) from misorientations in flynns.  
+  
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+# INFO: These codes have hardly been changed by Florian Steinbach (therefore no FS_ prefix). The main changes are:
+#
+#    1. Possibility to exclude a phase (i.e. air)
+#    2. Tracking of polygonisation events
+#
+# The codes are by Albert Griera, contact him for more information
+#  * Institution: Departament Geologia, Universitat Autònoma de Barcelona
+#  * Email: albert.griera@uab.cat
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # 
+
+Usage:
+
+Two Elle modules are necessary: 
+1) subgrain_unodes_alb
+2) u2f_sgb_alb (u2f = unode2flynn)
+
+The 1st is searching for clusters of unodes (in existing flynns) within a certain misorientation angle. The 2nd module creates a new flynn around these clusters. As a third stage, you should always run a topology check afterwards (FS_topocheck).
+
+# # # # # Usage of subgrain_unodes_alb: # # # # #
+
+    subgrain_unodes_alb -i file.elle -u A B C D -n
+
+    A: gridsize (default is 256)
+    B: high angle grain boundary (threshold for subgrains, default 5°)
+    C: Excluded phase (any phase ID you want to exclude from subgrain creation and nucleation, default is 2, set to 0 to switch this off)
+    D: Neighbour order, default = 1 means 1st order neighbours = 8 neighbours
+
+# # # # # Usage of u2f_sgb_alb: # # # # #
+
+    subgrain_unodes_alb -i file.elle -u A B C D -n
+
+    A: gridsize (default is 256)
+    B: cluster size (min. number of unodes in a cluster to create new flynn, default: 10)
+    C: Set to 1 to only use the flynn id indicated in D (but usually KEEP AT 0, default: 0)
+    D: See C :-)
+
+
+
+IMPORTANT: Keep the symmetry.symm file in the folder form where you call the codes.

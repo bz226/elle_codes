@@ -1,0 +1,15 @@
+Up- or down scaling the Elle model box by a user-defined factor:
+
+Usage: FS_scalefile -i fname.elle -u X Y -n
+
+X: Scaling factor in x-direction (if larger than 1: upscaling)
+Y: Scaling factor in y-direction
+
+SPECIALITY: 
+If you use a factor < -1000 for X, the code will scale ANY model box back to 1 by 1. The second input value (Y) will then control scaling for both x and y and scale up or down the whole box: E.g.: 
+-u -1000 1   = 1x1 box
+-u -1000 2   = 2x2 box
+-u -1000 0.5 = 0.5x0.5 box
+
+The ratio of x and y length will always be 1
+

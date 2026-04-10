@@ -1,0 +1,16 @@
+#include "../../elle.tmpl"
+
+
+SRCS= mat.cc 
+OBJS= mat.o 
+
+.SUFFIXES: .cc .o
+.cc .o:
+    NormalCplusplusObjectRule()
+
+config.h:
+	./configure
+
+MakeLibTarget(matrix,_base,$(OBJS),$(LIBDIR),$(INCLUDES_B),base)
+
+CleanMakefile()

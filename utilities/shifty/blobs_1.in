@@ -1,0 +1,42 @@
+
+1. Setup commands
+---------------------------------------------------------
+
+OUTPUT   BIN=basil
+LABEL    simple shear, hard grain
+MESH     TYPE=3 FAULT=1
+POLY     FILE=tmp.poly
+GEOMETRY XLEN=1.0 YLEN=1.0 NCOMP=1 IGRAV=4
+VISDENS  SE =1
+SOLVE    AC=1.0E-4 ACNL=1.0E-2 ITSTOP=500
+BCOND    IOFF=1 VELXO=0.0 VELYO=0.0
+LAGRANGE LGMESH MARKERS FILE=lastlg
+
+
+2. Timestep commands
+---------------------------------------------------------
+
+STEPSIZE IDT0=20
+STOP     KEXIT=500 TEXIT=0.05
+SAVE     KSAVE=50 TSAVE=0.05
+REMESH   IGRID=0
+
+3. Boundary condition commands
+---------------------------------------------------------
+
+These are the Boundary Conditions for the tiltblock problem
+
+On lower boundary, zero normal stress, and zero
+ tangential velocity, but also fix u = 0 in middle
+ON Y = YMIN : UX = -0.25
+ON Y = YMIN : UY = 0.0
+
+ON Y = YMAX : UX = 0.25
+ON Y = YMAX : UY = 0.0
+
+On fault boundary
+ON X = XMIN : FL = 0.0
+ON X = XMAX : FL = 0.0
+
+MARKERS  ROWS=5, COLS=10, R=0.02, XMIN=0.05, XMAX=0.75, &
+           YMIN=0.5, YMAX=0.9

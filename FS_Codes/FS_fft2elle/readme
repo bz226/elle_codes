@@ -1,0 +1,5 @@
+FS_fft2elle -u A B C
+
+A - Set to 1 if you wish to import dislocation densities from tex.out file, 0 if not
+B - To exclude a phase from dislocation density update, set to the phase ID (e.g. 2-bubbles) if you want to do that. Set to 0 to NOT exclude anything (0 is default)
+C - NEW!! To import data for passive marker grids in U_FINITE_STRAIN (unode position will be stored in CURR_S_X and Y) type the dimension (e.g. 128 or 256). Set to 0 if you do not want to create passive marker grid data

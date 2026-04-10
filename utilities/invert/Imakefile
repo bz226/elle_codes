@@ -1,0 +1,28 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  invert.main.cc invert.elle.cc /* source files for your code */
+OBJS=  invert.main.o invert.elle.o /* object files for your code */
+THISAPP= invert                       /* the name of your executable */
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+
+/*AllTarget($(THISAPP))*/
+
+.SUFFIXES: .cc .o
+	NormalCplusplusObjectRule()
+
+MakeBatch($(THISAPP),$(BTCHEXT),$(OBJS),$(BINDIRB))
+                                                                                
+MakeDisplayX($(THISAPP),$(XEXT),$(OBJS),$(BINDIRX))
+                                                                                
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+
+CleanMakefile()

@@ -1,0 +1,23 @@
+#define IHaveSubdirs
+#define PassCDebugFlags
+
+#include "../../extra.rules"
+
+SUBDIRS = Dolaunch_unode2flynn fft2elle_data\
+ full_gbmunodes plot_misorientation_unode_boundary tricky_utility unode2flynn
+SUBDIRS_X = Dolaunch_unode2flynn fft2elle_data\
+ full_gbmunodes plot_misorientation_unode_boundary tricky_utility unode2flynn
+SUBDIRS_WX = Dolaunch_unode2flynn fft2elle_data\
+ full_gbmunodes plot_misorientation_unode_boundary tricky_utility unode2flynn
+SUBDIRS_B = Dolaunch_unode2flynn fft2elle_data\
+ full_gbmunodes plot_misorientation_unode_boundary tricky_utility unode2flynn
+
+MakeDisplayWXSubdirs($(SUBDIRS_WX))
+NamedTargetSubdirs(install_wx,$(SUBDIRS_WX),"installing display_wx",NullParameter,install_wx)
+MakeDisplayXSubdirs($(SUBDIRS_X))
+NamedTargetSubdirs(install_x,$(SUBDIRS_X),"installing display_x",NullParameter,install_x)
+MakeBatchSubdirs($(SUBDIRS_B))
+NamedTargetSubdirs(install_b,$(SUBDIRS_B),"installing batch",NullParameter,install_b)
+DependSubdirs($(SUBDIRS))
+CleanMakefile()
+CleanmkSubdirs($(SUBDIRS))

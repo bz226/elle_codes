@@ -1,0 +1,36 @@
+This script generates the finite position gradient tensors from the incremental position gradient tensors from step i to k of a simulation.
+The script stores finite data in the input Elle file in the six attributes from U_ATTRIB_A to -F.
+
+A - F11
+B - F12
+C - F21
+D - F22
+E - dx
+F - dy
+
+All incr. pos. grad. tensor files should be stored in the same directory. Their name should start with "IncrPosGradTensorXXX.txt".
+XXX indicates the 3 digit (filled with zeros) number of their simulation step.
+
+In case the input Elle file does not contain U_FINITE_STRAIN, which stores the finite passive marker positions: 
+This attribute is added and the final positions from the last incremental pos. grad. file are stored in the attribute.
+
+Usage:
+
+FS_postprocess_strainanalysis -i file.elle -u A B C D -n
+
+-> file.elle should be the file that contains flynn and passive marker situation at LAST step (B).
+
+A: The start step to use (does not have to be 1), default: 1
+B: The last step to use. 
+C: Output finite tensor and dx,dy data in text file? (1 for yes, 0 for no (0 is default)
+D: Write an Elle file for every INCREMENTAL step (1 for yes, 0 for no (0 is default))
+    --> This option will only plot Elle files directly starting with UNODES block. 
+        Those will contain the incremental data from the corresponding step. 
+        They can also be transformed in a plotting file using FS_plot_strainanalysis. 
+        If flynns and bnodes should be plotted, too, those would have to be added from the actual resulting Elle file from this step.
+    --> ATTENTION: Potentially produces a lot of files: 
+        By default, they are stored in the present working directory, but you can change the store path in line 71 of .cc file (cf. the comment)
+
+Please make sure that B>=A otherwise computation would not make a lot of sense :-)
+
+Hint: If you want to read all incremental tensor files from another directory, change start of the string in line 73 in .cc file accordingly

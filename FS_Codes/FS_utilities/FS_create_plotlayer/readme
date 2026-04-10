@@ -1,0 +1,24 @@
+FS_create_plotlayer:
+
+Sets all unodes of the second phase (until now where flynn or unode VISCOSITY=2) to a given value for a user defined unode attribute. The resulting values will always be stored in U_ATTRIB_F, so make sure no important data is overwritten!
+
+OR: Delete all unodes @ unode VISCOSITY = X, if A=1
+
+FS_create_plotlayer -i file.elle -u A B C D
+
+A: UNODE DELETION: Set to X if you wish to delete all unodes @ U_VISCOSITY = X, if not, set to 0 and the inputs of D and E are regarded. Set to -1 if you do not wish to use them at all
+
+B: When set to any other value than 0, all flynn clusters with this value as phase ID are merged, so that only clusters remain. Default = 0, i.e. do nothing
+
+C: Scale the whole box and all nodes (boundary and unconnected) by the factor specified in C. C should be > 1 to enlarge and < 1 to shrink the box. Setting the default value 0 means NO scaling
+
+D: Type the value to which all unodes will be set for the attribute defined in B. By typing 0 all values will be set to the max. value in the attribute. Default: 0
+
+E: Specify which unode attribute to use by using this code:
+    0: U_DISLOCDEN
+    1: U_EULER_3 (so far input A only defines euler-alpha)
+    2: U_ATTRIB_A
+    3: U_ATTRIB_B
+    4: U_ATTRIB_C
+    5: U_ATTRIB_D
+    6: U_ATTRIB_E

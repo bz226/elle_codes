@@ -1,0 +1,24 @@
+This is the polyphase GBM code. 
+
+This version does a scaling of dislocation energies to basal activity. The energy of non-basal dislocations is approx. 4 times higher than for basal dislocations. Therefore, the code scales the dislocation energy which is a priori assumed for basal dislocations up. 
+
+An example: If the basal activity is 75%, the energy will be:
+E = 0.75*E_basal + 0.25*(E_basal*4)  --> As non-basal planes have 4x higher energy...the factor in the code is not exactly 4, but the real factor
+
+Keep phase_db.txt in the folder form where you start the GBM code. Remember that the file "initial_stuff.txt" is created by the code and that it should be kept in this folder whenever restarting a truely polyphase simulation, too.
+
+The code is doing topology checks after every GBM step (new, by F. Steinbach). 
+
+For further instructions on the code see Steinbach et al. (2016); Roessiger et al. (2014) or Becker et al. (2008)
+
+Usage:
+
+FS_gbm_pp_fft -i file.elle -u A B C D E
+A. A=1: Also use diagonal trial positions, A=0: Do not use them
+B. The afactor for dislocden redistribution or so?! --> I always set to to 0
+C. Logscreen, type 1 to switch random choice of bnodes of and to access them always in the same order
+D. Start Timestep: Timesteps already performed in input file (if there are any, if D!=0 use initial_stuff.txt file!!)
+E. ExcludePhase: Indicate any phase which inner boundaries are unimportant, e.g. air-air boundaries. Type VISCOSITY as phase ID indicator to use it, type 0 not to use it
+
+
+ATTENTION: If you wish to reduce the intrinsic mobilities in the middle part of the box, see "readme" file in "GBM_ReduceMogInTheMiddle/"

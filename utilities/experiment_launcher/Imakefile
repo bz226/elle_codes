@@ -1,0 +1,36 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS=  main.cc
+OBJS=  main.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+
+THISAPP=experiment_launcher
+TXT1=examples.txt
+TXT2=single.txt
+BAT1=sybil.bat
+BAT2=sybilps.bat
+LINKDIR=../../../experiments
+
+.SUFFIXES: .cc .o
+	 NormalCplusplusObjectRule()
+
+
+MakeDisplayWX($(THISAPP),$(WXEXT),$(OBJS),$(BINDIRWX))
+#ifdef __WIN32__
+InstallTarget(install$(WXEXT),$(BAT1),NullParameter,$(BINDIRWX))
+InstallTarget(install$(WXEXT),$(BAT2),NullParameter,$(BINDIRWX))
+#endif
+InstallTarget(install$(WXEXT),$(TXT1),NullParameter,$(BINDIRWX))
+InstallTarget(install$(WXEXT),$(TXT2),NullParameter,$(BINDIRWX))
+
+CleanMakefile()

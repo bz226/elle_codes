@@ -1,0 +1,7 @@
+FS_elle2fft:
+
+A simpler version of elle2fft, very similar to elle2fft. The only difference is that flynns are not regarded creating the make.out file, which will with this code only contain unodes and 0 grains. Effects: 
+    --> In all.out file the appended numbers are not present, they represent stress/strain states of the individual grains
+    --> However faster computation during PPC code
+    --> You can change it back to the precious way by setting the boolean variable in line 29 to false
+    

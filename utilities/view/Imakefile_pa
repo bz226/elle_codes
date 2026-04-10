@@ -1,0 +1,42 @@
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+
+#include "../../elle.tmpl"
+
+SRCS1=  show.main.cc show.elle.cc
+OBJS1=  show.main.o show.elle.o
+SRCS2=  plotaxes.main.cc plotaxes.elle.cc
+OBJS2=  plotaxes.main.o plotaxes.elle.o
+
+SRCS= $(SRCS1) $(SRCS2)
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+LOCAL_LIBRARIES2 = $(ELLELIB) $(MATRLIB)
+DEPLIBS2 = $(DEPELLELIB) $(DEPMATRLIB)
+DEFINES= -DXSYB
+
+THISAPP1=showelle
+THISAPP2=plotaxes
+
+AllTarget($(THISAPP1))
+
+.SUFFIXES: .cc .o
+.cc.o:
+	NormalCplusplusObjectRule()
+
+
+NormalCplusplusProgramTarget($(THISAPP1),$(OBJS1),$(DEPLIBS),$(LOCAL_LIBRARIES),-lm)
+
+InstallProgram($(THISAPP1),$(BINDIR))
+
+AllTarget($(THISAPP2))
+
+NormalCplusplusProgramTarget($(THISAPP2),$(OBJS2),$(DEPLIBS),$(LOCAL_LIBRARIES),-lm)
+
+InstallProgram($(THISAPP2),$(BINDIR))
+
+DependTarget()

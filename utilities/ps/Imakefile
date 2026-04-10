@@ -1,0 +1,38 @@
+#ifdef HasMotif
+#ifndef MotifDefines
+#ifdef SGIArchitecture
+#define XpmTop /usr
+#endif
+#include <Motif.tmpl>
+#endif
+#endif
+
+#include "../../elle.tmpl"
+
+/* change the next 4 lines to suit your application */
+/* all the src in one file for this app */
+SRCS=  ps.main.cc ps.elle.cc /* source files for your code */
+OBJS=  ps.main.o ps.elle.o /* object files for your code */
+THISAPP= showelleps                       /* the name of your executable */
+APP2= batchps
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+/*MakeBase($(THISAPP),$(BASEEXT),$(OBJS),$(BINDIRB))*/
+base::Concat($(THISAPP),$(BASEEXT))                              @@\
+INCLUDES= $(INCLUDES_X)                       @@\
+    NormalCplusplusProgramTarget(Concat($(THISAPP),$(BASEEXT)),$(OBJS),$(DEPLIBS_PS),$(LOCAL_LIBRARIES_PS) $(EXTRA_LIBS),NullParameter) @@\
+InstallNamedTarget(install$(BASEEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRB),$(THISAPP))
+
+InstallNamedTarget(install$(XEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRX),$(THISAPP))
+InstallNamedTarget(install$(WXEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRWX),$(THISAPP))
+
+InstallTarget(install$(BASEEXT),$(APP2),NullParameter,$(BINDIRB))
+InstallTarget(install$(XEXT),$(APP2),NullParameter,$(BINDIRX))
+InstallTarget(install$(WXEXT),$(APP2),NullParameter,$(BINDIRWX))
+
+CleanMakefile()

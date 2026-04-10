@@ -1,0 +1,19 @@
+This script is to assume GBS in a FFT simulation.
+All unodes around bnodes are set to 2nd phase. This second phase shall then be used as "grain-boundary" phase in FFT.
+
+The code uses a region of interest (ROI) around bnodes in which all unodes are set to U_VISCOSITY=GB-phase. By default, the ROI radius is the mean unode spacing. The code can temporarily add unodes by (also temporarily) changing the switch distance to improve detecting quality of boundary unodes. By default, this option is switched off.
+
+The properties of the boundary-unodes can be stored in a separate txt file called "TempGBunodesProps.txt"
+
+USAGE:
+--> Use BEFORE elle2fft
+FS_startGBS -i file.elle -u A B C -n
+
+A: The phase ID of the boundary phase (U_VISCOSITY is set to this value). Default = 2
+B: A factor by which the ROI radius around bnodes is increased. Default = 1 (radius is mean unode spacing)
+C: Temporarily use this switch distance to increase the number of bnodes and achieve a better description of boundary phase in unodes. Default: 0 (switched off)
+
+
+ATTENTION: With FS_startGBS, you need to use FS_elle2fft_onlyunodes during the simulation, as we need to load phase-IDs from unodes, not from flynns. For this purpose, the euler angles need to be stored in unodes initially, too.
+
+

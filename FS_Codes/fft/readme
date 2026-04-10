@@ -1,0 +1,10 @@
+Keep the code (.FOR) and the (.dim) file in one directory, cd to that directory and compile lby typing in the terminal:
+
+gfortran -O3 PPC15E-9.05.FOR -o FFT_vs256
+
+You can change the name "FFT_vs256" to something you like to suit your application. 
+
+--> Only compile codes like this, otherwise they're much too slow.
+--> Afterwards copy the executalbe in elle/elle/binwx folder to make it accessible like any other Elle code
+
+--> The prefix "FS" indicates that Florian Steinbach changed something: In particular this change makes it possible to use more than 1e6 Fourier points

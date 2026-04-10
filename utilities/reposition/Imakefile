@@ -1,0 +1,19 @@
+#include "../../elle.tmpl"
+
+SRCS=  reposition.main.cc reposition.elle.cc
+OBJS=  reposition.main.o reposition.elle.o
+
+EXTRA_LOAD_FLAGS = -L$(TOP)/lib
+DEFINES= -DXSYB
+
+THISAPP=reposition
+
+.SUFFIXES: .cc .o
+.cc .o:
+	NormalCplusplusObjectRule()
+
+MakeBase($(THISAPP),$(BASEEXT),$(OBJS),$(BINDIRB))
+InstallNamedTarget(install$(XEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRX),$(THISAPP))
+InstallNamedTarget(install$(WXEXT),$(THISAPP)$(BASEEXT),NullParameter,$(BINDIRWX),$(THISAPP))
+
+CleanMakefile()

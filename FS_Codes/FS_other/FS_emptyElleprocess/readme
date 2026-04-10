@@ -1,0 +1,16 @@
+This is an empty or "raw" Elle process. You can use it to start building your own Elle-module by adding code in "ProcessFunction" or whereever necessary.
+
+Remember to alter the "Imakefile" if you rename or add *.cc files. 
+The "Imakefile" is read by the software "imake" and will create a suitable Elle file. Check its content to understand how this works. Type:
+
+xmkmf
+
+to create a new Makefile and afterwards:
+
+make install_wx
+
+to compile. Afterwards you can type:
+
+make clean
+
+to remove temporary files.

@@ -1,0 +1,31 @@
+mkdir step1
+FFT_vs256
+fft2elle -i inifft001.elle -u 1 
+reposition -i movenodes.elle
+ 
+do_launch_u2f_user -i repos.elle -u 2 1e13 -n
+cp repos.elle u2f.elle
+chmod +x launch_u2f.shelle
+launch_u2f.shelle
+
+# Tricky part to prevent bnodes error
+tricky_vs02 -i u2f.elle -s 1 -f 1 -n # not active check TN!!
+## eliminate very tiny flynns using checkangle...
+checkangle -i tricky001.elle -s 1 -f 1 -n -u 0.1 0.5
+checkangle -i checkangle001.elle -s 1 -f 1 -n -u 0.2 1
+checkangle -i checkangle001.elle -s 1 -f 1 -n -u 0.3 1
+checkangle -i checkangle001.elle -s 1 -f 1 -n -u 0.4 1
+
+gbm_unodes_user -i checkangle001.elle -s 100 -f 10 -u 0 0 0 -n
+
+#elle2fft_non-ortho -i gbmunodes100.elle -u 256 0
+elle2fft_non-ortho_dmatrix -i gbmunodes100.elle -u 256 0  ##if unodes_size >256
+
+#rar a -df step1.rar *.elle *.out launch_u2f.shelle
+#rar e step1.rar make.out inifft001.elle temp.out
+#mv step1.rar gbm_unodes1.rar step1/
+
+
+
+
+

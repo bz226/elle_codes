@@ -1,0 +1,31 @@
+#define IHaveSubdirs
+#define PassCDebugFlags
+
+#include "../extra.rules"
+
+SUBDIRS = pblast gbdiff tbh split viscosity disloc_rx angle_rx\
+ gbm recovery statistics manuel diffusion melt latte nucleation\
+ proximity exchange growth melt metamorphism phasefield  sub_gg \
+ FFT_256
+SUBDIRS_X = pblast gbdiff growth tbh split viscosity disloc_rx angle_rx\
+ gbm recovery statistics manuel diffusion melt nucleation\
+ proximity exchange melt metamorphism phasefield  sub_gg \
+ FFT_256
+SUBDIRS_WX = pblast gbdiff tbh growth split viscosity disloc_rx\
+ angle_rx gbm recovery statistics manuel diffusion melt latte\
+ nucleation proximity exchange melt metamorphism phasefield sub_gg \
+ FFT_256
+SUBDIRS_B = pblast gbdiff tbh growth split viscosity disloc_rx\
+ angle_rx gbm recovery statistics manuel melt nucleation\
+ proximity exchange melt metamorphism phasefield sub_gg \
+ FFT_256
+
+MakeDisplayWXSubdirs($(SUBDIRS_WX))
+NamedTargetSubdirs(install_wx,$(SUBDIRS_WX),"installing display_wx",NullParameter,install_wx)
+MakeDisplayXSubdirs($(SUBDIRS_X))
+NamedTargetSubdirs(install_x,$(SUBDIRS_X),"installing display_x",NullParameter,install_x)
+MakeBatchSubdirs($(SUBDIRS_B))
+NamedTargetSubdirs(install_b,$(SUBDIRS_B),"installing batch",NullParameter,install_b)
+DependSubdirs($(SUBDIRS))
+CleanMakefile()
+CleanmkSubdirs($(SUBDIRS))
