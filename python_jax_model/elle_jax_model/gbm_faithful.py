@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+"""Faithful ELLE GBM translation entrypoints.
+
+This module is the supported parity target for the faithful branch.
+It intentionally avoids depending on the archived phase-field runtime.
+"""
+
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
+from .faithful_config import FaithfulSeedData, FaithfulSolverConfig, load_faithful_seed
+from .fft_bridge import FFTMechanicsSnapshot, load_legacy_fft_snapshot_sequence
+from .faithful_runtime import run_faithful_simulation_with_topology
 from .mesh import MeshFeedbackConfig, MeshRelaxationConfig, load_elle_mesh_seed
-from .simulation import GrainGrowthConfig, load_elle_label_seed
-from .topology import run_simulation_with_topology
+from .nucleation import NucleationConfig
+from .recovery import RecoveryConfig
 
 FAITHFUL_GBM_DEFAULTS = {
     "movement_model": "elle_surface",
@@ -16,18 +25,20 @@ FAITHFUL_GBM_DEFAULTS = {
     "topology_passes": 1,
     "use_diagonal_trials": True,
     "use_elle_physical_units": True,
+    "temperature_c": 25.0,
     "random_seed": 0,
     "stage_interval": 1,
+    "subloops_per_snapshot": 1,
+    "gbm_steps_per_subloop": 1,
+    "nucleation_steps_per_subloop": 0,
+    "nucleation_hagb_deg": 5.0,
+    "nucleation_min_cluster_unodes": 10,
+    "nucleation_parent_area_crit": 5.0e-4,
+    "recovery_steps_per_subloop": 0,
+    "recovery_hagb_deg": 5.0,
+    "recovery_trial_rotation_deg": 0.1,
+    "recovery_rotation_mobility_length": 500.0,
     "raster_boundary_band": 1,
-}
-
-_LEGACY_PHASEFIELD_DEFAULTS = {
-    "dt": 0.05,
-    "mobility": 1.0,
-    "gradient_penalty": 1.0,
-    "interaction_strength": 2.0,
-    "init_smoothing_steps": 0,
-    "init_noise": 0.0,
 }
 
 
@@ -35,11 +46,19 @@ _LEGACY_PHASEFIELD_DEFAULTS = {
 class FaithfulGBMSetup:
     """Concrete runtime setup for the NumPy-first faithful GBM branch."""
 
-    config: GrainGrowthConfig
+    config: FaithfulSolverConfig
     mesh_feedback: MeshFeedbackConfig
-    seed_info: dict[str, object]
+    seed_info: FaithfulSeedData
     mesh_seed: dict[str, Any]
+    mechanics_snapshot: FFTMechanicsSnapshot | None
+    mechanics_snapshots: tuple[FFTMechanicsSnapshot, ...]
     mesh_relax_overrides: dict[str, float]
+    subloops_per_snapshot: int
+    gbm_steps_per_subloop: int
+    nucleation_steps_per_subloop: int
+    nucleation_config: NucleationConfig
+    recovery_steps_per_subloop: int
+    recovery_config: RecoveryConfig
 
 
 def _derive_raster_boundary_band(
@@ -71,15 +90,23 @@ def build_faithful_gbm_setup(
     topology_passes: int = int(FAITHFUL_GBM_DEFAULTS["topology_passes"]),
     use_diagonal_trials: bool = bool(FAITHFUL_GBM_DEFAULTS["use_diagonal_trials"]),
     use_elle_physical_units: bool = bool(FAITHFUL_GBM_DEFAULTS["use_elle_physical_units"]),
+    temperature_c: float = float(FAITHFUL_GBM_DEFAULTS["temperature_c"]),
     random_seed: int = int(FAITHFUL_GBM_DEFAULTS["random_seed"]),
     stage_interval: int = int(FAITHFUL_GBM_DEFAULTS["stage_interval"]),
+    subloops_per_snapshot: int = int(FAITHFUL_GBM_DEFAULTS["subloops_per_snapshot"]),
+    gbm_steps_per_subloop: int = int(FAITHFUL_GBM_DEFAULTS["gbm_steps_per_subloop"]),
+    nucleation_steps_per_subloop: int = int(FAITHFUL_GBM_DEFAULTS["nucleation_steps_per_subloop"]),
+    nucleation_hagb_deg: float = float(FAITHFUL_GBM_DEFAULTS["nucleation_hagb_deg"]),
+    nucleation_min_cluster_unodes: int = int(FAITHFUL_GBM_DEFAULTS["nucleation_min_cluster_unodes"]),
+    nucleation_parent_area_crit: float = float(FAITHFUL_GBM_DEFAULTS["nucleation_parent_area_crit"]),
+    recovery_steps_per_subloop: int = int(FAITHFUL_GBM_DEFAULTS["recovery_steps_per_subloop"]),
+    recovery_hagb_deg: float = float(FAITHFUL_GBM_DEFAULTS["recovery_hagb_deg"]),
+    recovery_trial_rotation_deg: float = float(FAITHFUL_GBM_DEFAULTS["recovery_trial_rotation_deg"]),
+    recovery_rotation_mobility_length: float = float(
+        FAITHFUL_GBM_DEFAULTS["recovery_rotation_mobility_length"]
+    ),
     raster_boundary_band: int | None = None,
-    dt: float | None = None,
-    mobility: float | None = None,
-    gradient_penalty: float | None = None,
-    interaction_strength: float | None = None,
-    init_smoothing_steps: int | None = None,
-    init_noise: float | None = None,
+    phase_db_path: str | None = None,
     mesh_relax_steps: int | None = None,
     mesh_topology_steps: int | None = None,
     mesh_movement_model: str | None = None,
@@ -87,9 +114,8 @@ def build_faithful_gbm_setup(
     mesh_use_elle_physical_units: bool | None = None,
     mesh_random_seed: int | None = None,
     mesh_feedback_every: int | None = None,
-    mesh_feedback_strength: float | None = None,
-    mesh_transport_strength: float | None = None,
     mesh_feedback_boundary_width: int | None = None,
+    mechanics_snapshot_dir: str | Path | None = None,
 ) -> FaithfulGBMSetup:
     """Build the original-ELLE-style mesh-only GBM runtime configuration."""
 
@@ -111,42 +137,29 @@ def build_faithful_gbm_setup(
     if mesh_feedback_boundary_width is not None:
         raster_boundary_band = int(mesh_feedback_boundary_width)
 
-    dt = float(_LEGACY_PHASEFIELD_DEFAULTS["dt"] if dt is None else dt)
-    mobility = float(_LEGACY_PHASEFIELD_DEFAULTS["mobility"] if mobility is None else mobility)
-    gradient_penalty = float(
-        _LEGACY_PHASEFIELD_DEFAULTS["gradient_penalty"] if gradient_penalty is None else gradient_penalty
+    seed_info = load_faithful_seed(init_elle_path, attribute=init_elle_attribute)
+    mesh_seed, relax_overrides = load_elle_mesh_seed(
+        init_elle_path,
+        {
+            "source_labels": seed_info.source_labels,
+            "grid_shape": seed_info.grid_shape,
+            "unode_ids": seed_info.unode_ids,
+            "unode_positions": seed_info.unode_positions,
+            "unode_grid_indices": seed_info.unode_grid_indices,
+            "unode_field_values": seed_info.unode_field_values,
+            "unode_field_order": seed_info.unode_field_order,
+            "attribute": seed_info.attribute,
+        },
     )
-    interaction_strength = float(
-        _LEGACY_PHASEFIELD_DEFAULTS["interaction_strength"]
-        if interaction_strength is None
-        else interaction_strength
-    )
-    init_smoothing_steps = int(
-        _LEGACY_PHASEFIELD_DEFAULTS["init_smoothing_steps"]
-        if init_smoothing_steps is None
-        else init_smoothing_steps
-    )
-    init_noise = float(_LEGACY_PHASEFIELD_DEFAULTS["init_noise"] if init_noise is None else init_noise)
-    feedback_strength = 0.0 if mesh_feedback_strength is None else float(mesh_feedback_strength)
-    transport_strength = 0.0 if mesh_transport_strength is None else float(mesh_transport_strength)
 
-    seed_info = load_elle_label_seed(init_elle_path, attribute=init_elle_attribute)
-    mesh_seed, relax_overrides = load_elle_mesh_seed(init_elle_path, seed_info)
-
-    config = GrainGrowthConfig(
-        nx=int(seed_info["grid_shape"][0]),
-        ny=int(seed_info["grid_shape"][1]),
-        num_grains=int(seed_info["num_labels"]),
-        dt=float(dt),
-        mobility=float(mobility),
-        gradient_penalty=float(gradient_penalty),
-        interaction_strength=float(interaction_strength),
+    config = FaithfulSolverConfig(
+        nx=int(seed_info.grid_shape[0]),
+        ny=int(seed_info.grid_shape[1]),
+        num_grains=int(seed_info.num_labels),
         seed=int(seed),
-        init_mode="elle",
         init_elle_path=str(init_elle_path),
-        init_elle_attribute=str(seed_info["attribute"]),
-        init_smoothing_steps=int(init_smoothing_steps),
-        init_noise=float(init_noise),
+        init_elle_attribute=str(seed_info.attribute),
+        seed_data=seed_info,
     )
 
     if raster_boundary_band is None:
@@ -161,11 +174,14 @@ def build_faithful_gbm_setup(
         movement_model=str(movement_model),
         use_diagonal_trials=bool(use_diagonal_trials),
         use_elle_physical_units=bool(use_elle_physical_units),
+        temperature_c=float(temperature_c),
         random_seed=int(random_seed),
+        phase_db_path=phase_db_path,
     )
     if relax_overrides:
         mesh_config = replace(
             mesh_config,
+            time_step=float(relax_overrides.get("time_step", mesh_config.time_step)),
             speed_up=float(relax_overrides.get("speed_up", mesh_config.speed_up)),
             switch_distance=relax_overrides.get("switch_distance", mesh_config.switch_distance),
             min_node_separation_factor=float(
@@ -184,19 +200,41 @@ def build_faithful_gbm_setup(
 
     mesh_feedback = MeshFeedbackConfig(
         every=int(stage_interval),
-        strength=float(feedback_strength),
-        transport_strength=float(transport_strength),
+        strength=0.0,
+        transport_strength=0.0,
         update_mode="mesh_only",
         boundary_width=int(raster_boundary_band),
         initial_mesh_state=mesh_seed,
         relax_config=mesh_config,
     )
+    mechanics_snapshots = (
+        load_legacy_fft_snapshot_sequence(mechanics_snapshot_dir)
+        if mechanics_snapshot_dir is not None
+        else ()
+    )
+    mechanics_snapshot = mechanics_snapshots[0] if mechanics_snapshots else None
     return FaithfulGBMSetup(
         config=config,
         mesh_feedback=mesh_feedback,
         seed_info=seed_info,
         mesh_seed=mesh_seed,
+        mechanics_snapshot=mechanics_snapshot,
+        mechanics_snapshots=tuple(mechanics_snapshots),
         mesh_relax_overrides=relax_overrides,
+        subloops_per_snapshot=int(subloops_per_snapshot),
+        gbm_steps_per_subloop=int(gbm_steps_per_subloop),
+        nucleation_steps_per_subloop=int(nucleation_steps_per_subloop),
+        nucleation_config=NucleationConfig(
+            high_angle_boundary_deg=float(nucleation_hagb_deg),
+            min_cluster_unodes=int(nucleation_min_cluster_unodes),
+            parent_area_crit=float(nucleation_parent_area_crit),
+        ),
+        recovery_steps_per_subloop=int(recovery_steps_per_subloop),
+        recovery_config=RecoveryConfig(
+            high_angle_boundary_deg=float(recovery_hagb_deg),
+            trial_rotation_deg=float(recovery_trial_rotation_deg),
+            rotation_mobility_length=float(recovery_rotation_mobility_length),
+        ),
     )
 
 
@@ -208,6 +246,7 @@ def run_faithful_gbm_simulation(
     save_every: int,
     on_snapshot: Callable[[int, object, dict[str, Any], dict[str, Any] | None], None] | None = None,
     setup: FaithfulGBMSetup | None = None,
+    include_initial_snapshot: bool = False,
     **setup_kwargs: Any,
 ) -> tuple[object, list[object], list[dict[str, Any]]]:
     """Run the dedicated NumPy-first faithful GBM translation path."""
@@ -221,10 +260,19 @@ def run_faithful_gbm_simulation(
             **setup_kwargs,
         )
 
-    return run_simulation_with_topology(
+    return run_faithful_simulation_with_topology(
         config=setup.config,
         steps=int(steps),
         save_every=int(save_every),
         on_snapshot=on_snapshot,
         mesh_feedback=setup.mesh_feedback,
+        mechanics_snapshot=setup.mechanics_snapshot,
+        mechanics_snapshots=setup.mechanics_snapshots,
+        include_initial_snapshot=bool(include_initial_snapshot),
+        subloops_per_snapshot=int(setup.subloops_per_snapshot),
+        gbm_steps_per_subloop=int(setup.gbm_steps_per_subloop),
+        nucleation_steps_per_subloop=int(setup.nucleation_steps_per_subloop),
+        nucleation_config=setup.nucleation_config,
+        recovery_steps_per_subloop=int(setup.recovery_steps_per_subloop),
+        recovery_config=setup.recovery_config,
     )

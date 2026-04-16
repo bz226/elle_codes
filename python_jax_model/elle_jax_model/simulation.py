@@ -149,6 +149,7 @@ def load_elle_label_seed(
             raise ValueError(f"ELLE file has no unode attribute sections to seed from: {path}")
 
         scored_candidates: list[tuple[tuple[float, float, str], str]] = []
+        integer_like_candidates: set[str] = set()
         for name in attr_candidates:
             field_np, _, _ = _field_from_sparse_unodes(unodes, sections[name])
             array = np.asarray(field_np, dtype=np.float64)
@@ -159,10 +160,13 @@ def load_elle_label_seed(
             if unique_count <= 1:
                 continue
             if integer_residual <= 5.1e-1:
+                integer_like_candidates.add(str(name))
                 closeness = abs(unique_count - flynn_count) if flynn_count > 0 else float(unique_count)
                 scored_candidates.append(((closeness, integer_residual, float(unique_count), name), name))
 
-        if scored_candidates:
+        if "U_ATTRIB_C" in integer_like_candidates:
+            requested_attribute = "U_ATTRIB_C"
+        elif scored_candidates:
             scored_candidates.sort(key=lambda item: item[0])
             requested_attribute = scored_candidates[0][1]
         else:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -15,6 +18,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from portable_elle_viewer import build_viewer_payload
 
 from run_simulation import resolve_mesh_preset, resolve_runtime_preset
+import elle_jax_model.mesh as mesh_module
+import elle_jax_model.nucleation as nucleation_module
+import elle_jax_model.recovery as recovery_module
 from elle_jax_model.artifacts import dominant_grain_map, save_snapshot_artifacts, snapshot_statistics
 from elle_jax_model.benchmark_validation import (
     evaluate_release_dataset_benchmarks,
@@ -33,10 +39,28 @@ from elle_jax_model.calibration import (
     score_existing_calibration_runs,
 )
 from elle_jax_model.elle_export import extract_flynn_topology, write_unode_elle
+from elle_jax_model.fft_bridge import (
+    apply_legacy_fft_snapshot_to_mesh_state,
+    load_legacy_fft_snapshot,
+    load_legacy_fft_snapshot_sequence,
+)
 from elle_jax_model.gbm_faithful import (
     FAITHFUL_GBM_DEFAULTS,
     build_faithful_gbm_setup,
     run_faithful_gbm_simulation,
+)
+from elle_jax_model.legacy_reference import (
+    build_legacy_reference_bundle,
+    compare_legacy_reference_bundle,
+    compare_legacy_reference_snapshot,
+    compare_legacy_reference_transition,
+    extract_legacy_reference_snapshot,
+    extract_legacy_reference_transition,
+    load_legacy_reference_bundle,
+)
+from elle_jax_model.mechanics_replay import (
+    run_faithful_mechanics_replay,
+    validate_faithful_mechanics_transition,
 )
 from elle_jax_model.elle_phasefield import (
     EllePhaseFieldConfig,
@@ -46,6 +70,11 @@ from elle_jax_model.elle_phasefield import (
     run_elle_phasefield_simulation,
     save_elle_phasefield_artifacts,
     write_elle_phasefield_state,
+)
+from elle_jax_model.figure2_validation import (
+    build_figure2_line_validation_report,
+    summarize_elle_label_area_distribution,
+    write_figure2_line_validation_html,
 )
 from elle_jax_model.elle_html_viewer import write_elle_html_viewer
 from elle_jax_model.elle_visualize import render_elle_file
@@ -57,7 +86,9 @@ from elle_jax_model.phasefield_compare import (
     run_original_elle_phasefield_sequence,
 )
 from elle_jax_model.mesh import (
+    _build_edge_mobility_lookup,
     _apply_segment_mass_partition,
+    _enforce_connected_label_ownership,
     _elle_surface_effective_dt,
     _elle_surface_velocity_from_force,
     _entry_partition_terms,
@@ -82,7 +113,16 @@ from elle_jax_model.mesh import (
     relax_mesh_state,
     update_seed_node_fields,
     update_seed_unode_fields,
+    update_seed_unode_sections,
 )
+from elle_jax_model.mobility import (
+    arrhenius_boundary_mobility,
+    boundary_segment_mobility,
+    caxis_misorientation_degrees,
+    load_phase_boundary_db,
+    misorientation_mobility_reduction,
+)
+from elle_jax_model.nucleation import NucleationConfig, apply_nucleation_stage
 from elle_jax_model.microstructure_validation import (
     compare_elle_microstructure_sequences,
     summarize_elle_microstructure,
@@ -93,6 +133,7 @@ from elle_jax_model.paper_validation import (
     summarize_liu_suckale_paper_from_text,
     summarize_llorens_structure_from_text,
 )
+from elle_jax_model.recovery import RecoveryConfig, apply_recovery_stage
 from elle_jax_model.simulation import (
     GrainGrowthConfig,
     initialize_order_parameters,
@@ -182,6 +223,7 @@ def _write_elle_mesh_seed_example(path: Path) -> Path:
         "SwitchDistance 0.05",
         "MaxNodeSeparation 0.11",
         "MinNodeSeparation 0.05",
+        "Timestep 3.0",
         "SpeedUp 2.0",
         "LOCATION",
         "10 0.00 0.00",
@@ -226,6 +268,120 @@ def _write_elle_mesh_seed_example(path: Path) -> Path:
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def _write_legacy_fft_snapshot_example(
+    root: Path,
+    *,
+    zero_based_ids: bool = False,
+    value_offset: float = 0.0,
+) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    base_ids = [0, 1, 2, 3] if zero_based_ids else [1, 2, 3, 4]
+    (root / "temp-FFT.out").write_text(
+        "\n".join(
+            [
+                "1 0 0",
+                "0 1 0",
+                "0 0 1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (root / "unodexyz.out").write_text(
+        "\n".join(
+            f"{unode_id} {0.1 * (index + 1) + value_offset:g} {0.2 * (index + 1) + value_offset:g} {0.3 * (index + 1) + value_offset:g}"
+            for index, unode_id in enumerate(base_ids)
+        ),
+        encoding="utf-8",
+    )
+    (root / "unodeang.out").write_text(
+        "\n".join(
+            f"{unode_id} {10 * (index + 1) + value_offset:g} {20 * (index + 1) + value_offset:g} {30 * (index + 1) + value_offset:g}"
+            for index, unode_id in enumerate(base_ids)
+        ),
+        encoding="utf-8",
+    )
+    (root / "tex.out").write_text(
+        "\n".join(
+            f"{unode_id} 0 0 0 {4 + 10 * index + value_offset:g} {5 + 10 * index + value_offset:g} {6 + 10 * index + value_offset:g} {7 + 10 * index + value_offset:g} {8 + 10 * index + value_offset:g} {9 + 10 * index + value_offset:g} {10 + 10 * index + value_offset:g} {11 + 10 * index + value_offset:g}"
+            for index, unode_id in enumerate(base_ids)
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+def _build_recovery_mesh_state(
+    *,
+    include_attr_f: bool = False,
+    attr_f_value: float = 0.0,
+    euler_values: tuple[tuple[float, float, float], ...] | None = None,
+) -> dict[str, object]:
+    field_values: dict[str, tuple[float, ...]] = {
+        "U_DISLOCDEN": (10.0, 10.0, 10.0, 10.0),
+    }
+    field_order: list[str] = ["U_DISLOCDEN"]
+    if include_attr_f:
+        field_values["U_ATTRIB_F"] = tuple(float(attr_f_value) for _ in range(4))
+        field_order.append("U_ATTRIB_F")
+    if euler_values is None:
+        euler_values = (
+            (2.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+        )
+    return {
+        "_runtime_seed_unodes": {
+            "ids": (1, 2, 3, 4),
+            "positions": (
+                (0.25, 0.25),
+                (0.25, 0.75),
+                (0.75, 0.25),
+                (0.75, 0.75),
+            ),
+            "grid_indices": (
+                (0, 0),
+                (0, 1),
+                (1, 0),
+                (1, 1),
+            ),
+            "grid_shape": (2, 2),
+        },
+        "_runtime_seed_unode_fields": {
+            "field_order": tuple(field_order),
+            "values": field_values,
+        },
+        "_runtime_seed_unode_sections": {
+            "field_order": ("U_EULER_3",),
+            "component_counts": {"U_EULER_3": 3},
+            "defaults": {"U_EULER_3": (0.0, 0.0, 0.0)},
+            "values": {
+                "U_EULER_3": tuple(tuple(float(component) for component in values) for values in euler_values)
+            },
+        },
+        "_runtime_seed_flynn_sections": {
+            "field_order": ("EULER_3", "DISLOCDEN"),
+            "id_order": (10,),
+            "defaults": {
+                "EULER_3": (0.0, 0.0, 0.0),
+                "DISLOCDEN": 0.0,
+            },
+            "values": {
+                "EULER_3": ((0.0, 0.0, 0.0),),
+                "DISLOCDEN": (10.0,),
+            },
+        },
+        "flynns": [
+            {
+                "flynn_id": 10,
+                "source_flynn_id": 10,
+                "label": 0,
+            }
+        ],
+        "stats": {},
+    }
 
 
 class SimulationTests(unittest.TestCase):
@@ -593,6 +749,107 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(report["reference_sequence"][-1]["grain_count"], 172)
         self.assertTrue(report["reference_trends"]["flags"]["coarsening_present"])
 
+    def test_summarize_elle_label_area_distribution_reads_component_areas(self) -> None:
+        source = (
+            PROJECT_ROOT.parent.parent.parent
+            / "TwoWayIceModel_Release"
+            / "elle"
+            / "example"
+            / "results"
+            / "fine_foam_step001.elle"
+        )
+
+        summary = summarize_elle_label_area_distribution(source)
+
+        self.assertEqual(summary["attribute"], "U_ATTRIB_C")
+        self.assertEqual(summary["grain_count"], 182)
+        self.assertEqual(len(summary["grain_area_fractions"]), 182)
+        self.assertGreater(summary["mean_grain_area"], 0.0)
+
+    def test_build_figure2_line_validation_report_matches_identical_sequence(self) -> None:
+        reference_dir = PROJECT_ROOT.parent.parent.parent / "TwoWayIceModel_Release" / "elle" / "example" / "results"
+
+        report = build_figure2_line_validation_report(
+            reference_dir=reference_dir,
+            candidate_dir=reference_dir,
+            pattern="fine_foam_step00[1-3].elle",
+            kde_points=32,
+        )
+
+        line = report["figure2_like_validation"]["mean_grain_area_line"]
+        distributions = report["figure2_like_validation"]["grain_area_distributions"]
+
+        self.assertEqual(line["steps"], [1, 2, 3])
+        self.assertEqual(line["rmse"], 0.0)
+        self.assertEqual(len(distributions), 3)
+        self.assertEqual(len(distributions[0]["grain_area_grid"]), 32)
+        self.assertIn("grain_area_histogram_bin_edges", distributions[0])
+        self.assertIn("histogram_density", distributions[0]["reference"])
+        self.assertEqual(
+            distributions[0]["reference"]["kde"],
+            distributions[0]["candidate"]["kde"],
+        )
+
+    def test_write_figure2_line_validation_html_writes_svg_report(self) -> None:
+        report = {
+            "reference_dir": "reference",
+            "candidate_dir": "candidate",
+            "figure2_like_validation": {
+                "mean_grain_area_line": {
+                    "steps": [1, 2, 3],
+                    "reference_mean_grain_area": [0.10, 0.11, 0.13],
+                    "reference_std_grain_area": [0.01, 0.01, 0.02],
+                    "candidate_mean_grain_area": [0.09, 0.12, 0.14],
+                    "candidate_std_grain_area": [0.01, 0.015, 0.02],
+                    "rmse": 0.01,
+                    "normalized_rmse": 0.05,
+                },
+                "grain_area_distributions": [
+                    {
+                        "step": 1,
+                        "grain_area_grid": [0.0, 0.5, 1.0],
+                        "grain_area_histogram_bin_edges": [0.0, 0.5, 1.0],
+                        "reference": {
+                            "grain_count": 3,
+                            "histogram_density": [0.5, 0.2],
+                            "kde": [0.0, 1.0, 0.0],
+                        },
+                        "candidate": {
+                            "grain_count": 3,
+                            "histogram_density": [0.4, 0.3],
+                            "kde": [0.2, 0.8, 0.1],
+                        },
+                    },
+                    {
+                        "step": 2,
+                        "grain_area_grid": [0.0, 0.5, 1.0],
+                        "grain_area_histogram_bin_edges": [0.0, 0.5, 1.0],
+                        "reference": {
+                            "grain_count": 4,
+                            "histogram_density": [0.45, 0.25],
+                            "kde": [0.0, 0.9, 0.0],
+                        },
+                        "candidate": {
+                            "grain_count": 4,
+                            "histogram_density": [0.35, 0.3],
+                            "kde": [0.1, 0.85, 0.05],
+                        },
+                    },
+                ],
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outpath = write_figure2_line_validation_html(Path(tmpdir) / "figure2.html", report)
+            text = outpath.read_text(encoding="utf-8")
+
+        self.assertIn("Figure 2 style grain-area validation", text)
+        self.assertIn("<svg", text)
+        self.assertIn("Reference mean", text)
+        self.assertIn("Figure 2(a)-Style Grain-Area Distribution By Step", text)
+        self.assertIn("Figure 2(b)-Style Grain-Area KDE Comparison By Step", text)
+        self.assertIn("Figure 2(c)-Style Mean Grain Area Over Time", text)
+        self.assertIn("step 1", text)
+
     def test_generate_elle_seeded_candidate_sequence_writes_matched_steps(self) -> None:
         with tempfile.TemporaryDirectory() as reference_dir, tempfile.TemporaryDirectory() as output_dir:
             _write_periodic_flynn_example(Path(reference_dir) / "periodic_step001.elle")
@@ -894,8 +1151,8 @@ class SimulationTests(unittest.TestCase):
 
             setup = build_faithful_gbm_setup(elle_path)
 
-        self.assertEqual(setup.seed_info["attribute"], "U_ATTRIB_C")
-        self.assertEqual(setup.config.init_mode, "elle")
+        self.assertEqual(setup.seed_info.attribute, "U_ATTRIB_C")
+        self.assertEqual(setup.config.init_elle_attribute, "U_ATTRIB_C")
         self.assertEqual(setup.mesh_feedback.update_mode, "mesh_only")
         self.assertEqual(
             setup.mesh_feedback.relax_config.movement_model,
@@ -907,17 +1164,17 @@ class SimulationTests(unittest.TestCase):
             FAITHFUL_GBM_DEFAULTS["topology_passes"],
         )
         self.assertEqual(setup.mesh_feedback.every, FAITHFUL_GBM_DEFAULTS["stage_interval"])
+        self.assertEqual(setup.subloops_per_snapshot, FAITHFUL_GBM_DEFAULTS["subloops_per_snapshot"])
+        self.assertEqual(setup.gbm_steps_per_subloop, FAITHFUL_GBM_DEFAULTS["gbm_steps_per_subloop"])
         self.assertEqual(setup.mesh_feedback.boundary_width, FAITHFUL_GBM_DEFAULTS["raster_boundary_band"])
         self.assertTrue(bool(setup.mesh_feedback.relax_config.use_diagonal_trials))
         self.assertTrue(bool(setup.mesh_feedback.relax_config.use_elle_physical_units))
         self.assertEqual(setup.mesh_feedback.strength, 0.0)
         self.assertEqual(setup.mesh_feedback.transport_strength, 0.0)
-        self.assertEqual(setup.config.dt, 0.05)
-        self.assertEqual(setup.config.mobility, 1.0)
-        self.assertEqual(setup.config.gradient_penalty, 1.0)
-        self.assertEqual(setup.config.interaction_strength, 2.0)
-        self.assertEqual(setup.config.init_smoothing_steps, 0)
-        self.assertEqual(setup.config.init_noise, 0.0)
+        self.assertEqual(setup.config.nx, 2)
+        self.assertEqual(setup.config.ny, 2)
+        self.assertEqual(setup.config.num_grains, 2)
+        np.testing.assert_array_equal(setup.config.seed_data.label_field, np.array([[0, 0], [1, 1]], dtype=np.int32))
 
     def test_build_faithful_gbm_setup_derives_raster_boundary_band_from_elle_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -933,6 +1190,46 @@ class SimulationTests(unittest.TestCase):
 
         self.assertEqual(setup.mesh_feedback.boundary_width, 4)
 
+    def test_build_faithful_gbm_setup_infers_flynn_labels_when_ids_do_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = Path(tmpdir) / "seed.elle"
+            elle_path.write_text(
+                "\n".join(
+                    [
+                        "LOCATION",
+                        "10 0.0 0.0",
+                        "11 0.5 0.0",
+                        "12 0.5 1.0",
+                        "13 0.0 1.0",
+                        "20 1.0 0.0",
+                        "21 1.0 1.0",
+                        "FLYNNS",
+                        "10 4 10 11 12 13",
+                        "20 4 11 20 21 12",
+                        "UNODES",
+                        "0 0.25 0.75",
+                        "1 0.25 0.25",
+                        "2 0.75 0.75",
+                        "3 0.75 0.25",
+                        "U_ATTRIB_A",
+                        "Default 0.0",
+                        "0 1",
+                        "1 1",
+                        "2 2",
+                        "3 2",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            setup = build_faithful_gbm_setup(elle_path, init_elle_attribute="U_ATTRIB_A")
+
+        self.assertEqual(setup.seed_info.source_labels, (1, 2))
+        self.assertEqual(setup.mesh_seed["stats"]["num_flynns"], 2)
+        self.assertEqual([flynn["flynn_id"] for flynn in setup.mesh_seed["flynns"]], [10, 20])
+        self.assertEqual([flynn["label"] for flynn in setup.mesh_seed["flynns"]], [0, 1])
+
     def test_build_faithful_gbm_setup_supports_stage_named_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
@@ -943,6 +1240,8 @@ class SimulationTests(unittest.TestCase):
                 motion_passes=2,
                 topology_passes=3,
                 stage_interval=4,
+                subloops_per_snapshot=5,
+                gbm_steps_per_subloop=2,
                 raster_boundary_band=5,
                 use_diagonal_trials=False,
                 use_elle_physical_units=False,
@@ -952,6 +1251,8 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(setup.mesh_feedback.relax_config.steps, 2)
         self.assertEqual(setup.mesh_feedback.relax_config.topology_steps, 3)
         self.assertEqual(setup.mesh_feedback.every, 4)
+        self.assertEqual(setup.subloops_per_snapshot, 5)
+        self.assertEqual(setup.gbm_steps_per_subloop, 2)
         self.assertEqual(setup.mesh_feedback.boundary_width, 5)
         self.assertFalse(bool(setup.mesh_feedback.relax_config.use_diagonal_trials))
         self.assertFalse(bool(setup.mesh_feedback.relax_config.use_elle_physical_units))
@@ -980,32 +1281,1388 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(contexts[0]["mesh_state"]["stats"]["mesh_solver_backend"], "numpy_mesh_only")
         self.assertEqual(np.asarray(final_state).shape, (2, 2, 2))
 
-    def test_run_faithful_gbm_simulation_mesh_only_ignores_legacy_phasefield_coefficients(self) -> None:
+    def test_run_faithful_gbm_simulation_is_deterministic_for_same_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
             default_setup = build_faithful_gbm_setup(elle_path)
-            legacy_override_setup = build_faithful_gbm_setup(
-                elle_path,
-                dt=0.2,
-                mobility=3.5,
-                gradient_penalty=4.0,
-                interaction_strength=0.25,
-                init_smoothing_steps=5,
-                init_noise=0.2,
-            )
 
             default_state, _, _ = run_faithful_gbm_simulation(
                 steps=1,
                 save_every=1,
                 setup=default_setup,
             )
-            override_state, _, _ = run_faithful_gbm_simulation(
+            repeated_state, _, _ = run_faithful_gbm_simulation(
                 steps=1,
                 save_every=1,
-                setup=legacy_override_setup,
+                setup=default_setup,
             )
 
-        np.testing.assert_allclose(np.asarray(default_state), np.asarray(override_state))
+        np.testing.assert_allclose(np.asarray(default_state), np.asarray(repeated_state))
+
+    def test_run_faithful_gbm_simulation_can_emit_initial_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
+            observed_steps: list[int] = []
+            final_state, snapshots, topology_history = run_faithful_gbm_simulation(
+                init_elle_path=elle_path,
+                steps=1,
+                save_every=1,
+                include_initial_snapshot=True,
+                mesh_relax_steps=0,
+                mesh_topology_steps=0,
+                on_snapshot=lambda step, *_args: observed_steps.append(int(step)),
+            )
+
+        self.assertEqual(observed_steps, [0, 1])
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(np.asarray(snapshots[0]).shape, (2, 2, 2))
+        self.assertEqual(np.asarray(final_state).shape, (2, 2, 2))
+        self.assertTrue(any(snapshot["step"] == 0 for snapshot in topology_history))
+
+    def test_load_legacy_fft_snapshot_reads_bridge_snapshot_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "temp-FFT.out").write_text(
+                "\n".join(
+                    [
+                        "1 0 0",
+                        "0 2 0",
+                        "0 0 3",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "unodexyz.out").write_text(
+                "\n".join(
+                    [
+                        "0 0.1 0.2 0.3",
+                        "1 0.4 0.5 0.6",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "unodeang.out").write_text(
+                "\n".join(
+                    [
+                        "0 10 20 30",
+                        "1 40 50 60",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "tex.out").write_text(
+                "\n".join(
+                    [
+                        "0 1 2 3 4 5 6 7 8 9 10 11",
+                        "1 2 3 4 14 15 16 17 18 19 20 21",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            snapshot = load_legacy_fft_snapshot(root)
+
+        np.testing.assert_allclose(
+            snapshot.temp_matrix,
+            np.asarray([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]], dtype=np.float64),
+        )
+        np.testing.assert_array_equal(snapshot.unode_ids, np.asarray([0, 1], dtype=np.int32))
+        np.testing.assert_allclose(
+            snapshot.unode_strain_xyz,
+            np.asarray([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=np.float64),
+        )
+        np.testing.assert_array_equal(snapshot.euler_ids, np.asarray([0, 1], dtype=np.int32))
+        np.testing.assert_allclose(
+            snapshot.unode_euler_deg,
+            np.asarray([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]], dtype=np.float64),
+        )
+        np.testing.assert_allclose(snapshot.normalized_strain_rate, np.asarray([4.0, 14.0]))
+        np.testing.assert_allclose(snapshot.normalized_stress, np.asarray([5.0, 15.0]))
+        np.testing.assert_allclose(snapshot.basal_activity, np.asarray([6.0, 16.0]))
+        np.testing.assert_allclose(snapshot.prismatic_activity, np.asarray([7.0, 17.0]))
+        np.testing.assert_allclose(snapshot.geometrical_dislocation_density, np.asarray([8.0, 18.0]))
+        np.testing.assert_allclose(snapshot.statistical_dislocation_density, np.asarray([9.0, 19.0]))
+        np.testing.assert_array_equal(snapshot.fourier_point_ids, np.asarray([10, 20], dtype=np.int32))
+        np.testing.assert_array_equal(snapshot.fft_grain_numbers, np.asarray([11, 21], dtype=np.int32))
+
+    def test_load_legacy_fft_snapshot_falls_back_to_temp_out_and_allows_missing_tex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "temp.out").write_text(
+                "\n".join(
+                    [
+                        "5 6 7",
+                        "8 9 10",
+                        "11 12 13",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (root / "unodexyz.out").write_text("0 1 2 3\n", encoding="utf-8")
+            (root / "unodeang.out").write_text("0 4 5 6\n", encoding="utf-8")
+
+            snapshot = load_legacy_fft_snapshot(root)
+
+        np.testing.assert_allclose(
+            snapshot.temp_matrix,
+            np.asarray([[5.0, 6.0, 7.0], [8.0, 9.0, 10.0], [11.0, 12.0, 13.0]], dtype=np.float64),
+        )
+        self.assertTrue(snapshot.paths.temp_matrix_path.endswith("temp.out"))
+        self.assertIsNone(snapshot.tex_columns)
+        self.assertIsNone(snapshot.normalized_strain_rate)
+
+    def test_load_legacy_fft_snapshot_sequence_reads_sorted_snapshot_subdirectories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_legacy_fft_snapshot_example(root / "step002", value_offset=100.0)
+            _write_legacy_fft_snapshot_example(root / "step001", value_offset=0.0)
+
+            snapshots = load_legacy_fft_snapshot_sequence(root)
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertTrue(snapshots[0].paths.temp_matrix_path.endswith("step001/temp-FFT.out"))
+        np.testing.assert_allclose(snapshots[0].normalized_strain_rate, [4.0, 14.0, 24.0, 34.0])
+        np.testing.assert_allclose(snapshots[1].normalized_strain_rate, [104.0, 114.0, 124.0, 134.0])
+
+    def test_apply_legacy_fft_snapshot_to_mesh_state_updates_runtime_mechanics_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = load_legacy_fft_snapshot(_write_legacy_fft_snapshot_example(Path(tmpdir)))
+
+        mesh_state = _build_recovery_mesh_state(include_attr_f=False)
+        updated_mesh, mechanics_stats = apply_legacy_fft_snapshot_to_mesh_state(mesh_state, snapshot)
+
+        updated_fields = updated_mesh["_runtime_seed_unode_fields"]["values"]
+        updated_sections = updated_mesh["_runtime_seed_unode_sections"]["values"]
+        np.testing.assert_allclose(
+            np.asarray(updated_sections["U_EULER_3"], dtype=np.float64),
+            np.asarray(
+                [
+                    [10.0, 20.0, 30.0],
+                    [20.0, 40.0, 60.0],
+                    [30.0, 60.0, 90.0],
+                    [40.0, 80.0, 120.0],
+                ],
+                dtype=np.float64,
+            ),
+        )
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_A"], dtype=np.float64), [4.0, 14.0, 24.0, 34.0])
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_B"], dtype=np.float64), [5.0, 15.0, 25.0, 35.0])
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_D"], dtype=np.float64), [6.0, 16.0, 26.0, 36.0])
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_E"], dtype=np.float64), [7.0, 17.0, 27.0, 37.0])
+        np.testing.assert_allclose(np.asarray(updated_fields["U_DISLOCDEN"], dtype=np.float64), [18.0, 28.0, 38.0, 48.0])
+        self.assertEqual(mechanics_stats["mechanics_applied"], 1)
+        self.assertEqual(mechanics_stats["alignment_mode"], "exact_ids")
+        self.assertEqual(mechanics_stats["updated_unodes"], 4)
+        self.assertEqual(updated_mesh["stats"]["mechanics_snapshot_applied"], 1)
+
+    def test_apply_legacy_fft_snapshot_to_mesh_state_aligns_zero_based_snapshot_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = load_legacy_fft_snapshot(
+                _write_legacy_fft_snapshot_example(Path(tmpdir), zero_based_ids=True)
+            )
+
+        mesh_state = _build_recovery_mesh_state(include_attr_f=False)
+        updated_mesh, mechanics_stats = apply_legacy_fft_snapshot_to_mesh_state(mesh_state, snapshot)
+
+        self.assertEqual(mechanics_stats["alignment_mode"], "snapshot_zero_based")
+        updated_fields = updated_mesh["_runtime_seed_unode_fields"]["values"]
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_A"], dtype=np.float64), [4.0, 14.0, 24.0, 34.0])
+
+    def test_run_faithful_gbm_simulation_can_apply_mechanics_snapshot_before_outer_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            _write_legacy_fft_snapshot_example(root / "fft_snapshot")
+            setup = build_faithful_gbm_setup(
+                elle_path,
+                mechanics_snapshot_dir=root / "fft_snapshot",
+                motion_passes=0,
+                topology_passes=0,
+                subloops_per_snapshot=1,
+                gbm_steps_per_subloop=1,
+                nucleation_steps_per_subloop=0,
+                recovery_steps_per_subloop=0,
+            )
+            observed_contexts: list[dict[str, object]] = []
+
+            run_faithful_gbm_simulation(
+                setup=setup,
+                steps=1,
+                save_every=1,
+                on_snapshot=lambda _step, _phi, _topology=None, context=None: observed_contexts.append(context),
+            )
+
+        self.assertEqual(len(observed_contexts), 1)
+        context = observed_contexts[0]
+        self.assertEqual(context["mechanics_snapshot_enabled"], 1)
+        self.assertIsNotNone(context["mechanics_stats"])
+        self.assertEqual(context["mechanics_stats"]["mechanics_applied"], 1)
+        mesh_state = context["mesh_state"]
+        self.assertEqual(mesh_state["stats"]["workflow_mechanics_applied_total"], 1)
+        self.assertEqual(mesh_state["stats"]["workflow_mechanics_steps_per_snapshot"], 1)
+        updated_fields = mesh_state["_runtime_seed_unode_fields"]["values"]
+        np.testing.assert_allclose(np.asarray(updated_fields["U_ATTRIB_A"], dtype=np.float64), [4.0, 14.0, 24.0, 34.0])
+
+    def test_run_faithful_gbm_simulation_can_apply_mechanics_snapshot_sequence_across_outer_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step001", value_offset=0.0)
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step002", value_offset=100.0)
+            setup = build_faithful_gbm_setup(
+                elle_path,
+                mechanics_snapshot_dir=root / "fft_sequence",
+                motion_passes=0,
+                topology_passes=0,
+                subloops_per_snapshot=1,
+                gbm_steps_per_subloop=1,
+                nucleation_steps_per_subloop=0,
+                recovery_steps_per_subloop=0,
+            )
+            observed_contexts: list[dict[str, object]] = []
+
+            run_faithful_gbm_simulation(
+                setup=setup,
+                steps=2,
+                save_every=1,
+                on_snapshot=lambda _step, _phi, _topology=None, context=None: observed_contexts.append(context),
+            )
+
+        self.assertEqual(len(setup.mechanics_snapshots), 2)
+        self.assertEqual(len(observed_contexts), 2)
+        first_context = observed_contexts[0]
+        second_context = observed_contexts[1]
+        self.assertEqual(first_context["mechanics_stats"]["snapshot_index"], 1)
+        self.assertEqual(second_context["mechanics_stats"]["snapshot_index"], 2)
+        self.assertEqual(second_context["mechanics_snapshot_count"], 2)
+        first_fields = first_context["mesh_state"]["_runtime_seed_unode_fields"]["values"]
+        second_fields = second_context["mesh_state"]["_runtime_seed_unode_fields"]["values"]
+        np.testing.assert_allclose(
+            np.asarray(first_fields["U_ATTRIB_A"], dtype=np.float64),
+            [4.0, 14.0, 24.0, 34.0],
+        )
+        np.testing.assert_allclose(
+            np.asarray(second_fields["U_ATTRIB_A"], dtype=np.float64),
+            [104.0, 114.0, 124.0, 134.0],
+        )
+
+    def test_run_faithful_gbm_simulation_supports_mechanics_only_snapshot_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step001", value_offset=0.0)
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step002", value_offset=100.0)
+            setup = build_faithful_gbm_setup(
+                elle_path,
+                mechanics_snapshot_dir=root / "fft_sequence",
+                motion_passes=0,
+                topology_passes=0,
+                subloops_per_snapshot=1,
+                gbm_steps_per_subloop=0,
+                nucleation_steps_per_subloop=0,
+                recovery_steps_per_subloop=0,
+            )
+            observed_contexts: list[dict[str, object]] = []
+
+            run_faithful_gbm_simulation(
+                setup=setup,
+                steps=2,
+                save_every=1,
+                on_snapshot=lambda _step, _phi, _topology=None, context=None: observed_contexts.append(context),
+            )
+
+        self.assertEqual(len(observed_contexts), 2)
+        self.assertEqual(observed_contexts[0]["stage_kind"], "mechanics")
+        self.assertEqual(observed_contexts[1]["stage_kind"], "mechanics")
+        self.assertEqual(observed_contexts[1]["stages_per_snapshot"], 1)
+        self.assertEqual(observed_contexts[1]["mechanics_snapshot_index"], 2)
+        second_fields = observed_contexts[1]["mesh_state"]["_runtime_seed_unode_fields"]["values"]
+        np.testing.assert_allclose(
+            np.asarray(second_fields["U_ATTRIB_A"], dtype=np.float64),
+            [104.0, 114.0, 124.0, 134.0],
+        )
+
+    def test_run_faithful_mechanics_replay_writes_step0_and_step1_elle_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step001", value_offset=0.0)
+            report = run_faithful_mechanics_replay(
+                elle_path,
+                root / "fft_sequence",
+                outdir=root / "replay",
+            )
+
+        self.assertEqual(report["steps"], 1)
+        self.assertEqual(report["mechanics_snapshot_count"], 1)
+        self.assertIn("0", report["checkpoint_paths"])
+        self.assertIn("1", report["checkpoint_paths"])
+        self.assertTrue(report["checkpoint_paths"]["0"]["elle"].endswith("grain_unodes_00000.elle"))
+        self.assertTrue(report["checkpoint_paths"]["1"]["elle"].endswith("grain_unodes_00001.elle"))
+        self.assertTrue(report["topology_history_path"].endswith("topology_history.json"))
+
+    def test_validate_faithful_mechanics_transition_matches_reference_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            _write_legacy_fft_snapshot_example(root / "fft_sequence" / "step001", value_offset=0.0)
+            reference_replay = run_faithful_mechanics_replay(
+                elle_path,
+                root / "fft_sequence",
+                outdir=root / "reference_replay",
+            )
+            report = validate_faithful_mechanics_transition(
+                elle_path,
+                root / "fft_sequence",
+                reference_replay["checkpoint_paths"]["0"]["elle"],
+                reference_replay["checkpoint_paths"]["1"]["elle"],
+                outdir=root / "candidate_replay",
+            )
+
+        self.assertTrue(report["matches"])
+        self.assertEqual(report["mismatched_field_transitions"], [])
+        self.assertEqual(report["missing_field_transitions"], [])
+        self.assertEqual(report["unexpected_field_transitions"], [])
+
+    def test_run_faithful_gbm_simulation_rejects_empty_outer_step_without_mechanics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            elle_path = _write_elle_mesh_seed_example(root / "seed.elle")
+            setup = build_faithful_gbm_setup(
+                elle_path,
+                motion_passes=0,
+                topology_passes=0,
+                subloops_per_snapshot=1,
+                gbm_steps_per_subloop=0,
+                nucleation_steps_per_subloop=0,
+                recovery_steps_per_subloop=0,
+            )
+
+            with self.assertRaisesRegex(ValueError, "at least one GBM/nucleation/recovery stage per subloop or a mechanics snapshot"):
+                run_faithful_gbm_simulation(
+                    setup=setup,
+                    steps=1,
+                    save_every=1,
+                )
+
+    def test_apply_recovery_stage_adds_u_attrib_f_without_reducing_density_on_first_stage(self) -> None:
+        mesh_state = _build_recovery_mesh_state(include_attr_f=False)
+        labels = np.zeros((2, 2), dtype=np.int32)
+
+        updated_mesh, recovery_stats = apply_recovery_stage(
+            mesh_state,
+            labels,
+            RecoveryConfig(high_angle_boundary_deg=5.0, trial_rotation_deg=0.1, rotation_mobility_length=50.0),
+            recovery_stage_index=0,
+        )
+
+        updated_fields = updated_mesh["_runtime_seed_unode_fields"]["values"]
+        self.assertIn("U_ATTRIB_F", updated_fields)
+        self.assertGreater(float(updated_fields["U_ATTRIB_F"][0]), 0.0)
+        self.assertEqual(tuple(updated_fields["U_DISLOCDEN"]), (10.0, 10.0, 10.0, 10.0))
+        self.assertEqual(recovery_stats["density_reduced_unodes"], 0)
+        self.assertGreaterEqual(recovery_stats["rotated_unodes"], 1)
+
+    def test_symmetry_aware_recovery_misorientation_collapses_hex_equivalent_rotation(self) -> None:
+        symmetry_operators = recovery_module._resolve_recovery_symmetry_operators(RecoveryConfig())
+        misorientation = recovery_module._symmetry_misorientation_deg(
+            np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
+            np.asarray([[60.0, 0.0, 300.0]], dtype=np.float64),
+            symmetry_operators,
+        )
+
+        self.assertLess(float(misorientation[0]), 1.0e-3)
+
+    def test_legacy_recovery_trial_rotation_matches_old_trial_matrix_for_identity_orientation(self) -> None:
+        rotated = recovery_module._apply_legacy_recovery_trial_rotation(
+            np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
+            trial_index=0,
+            theta_deg=0.1,
+        )
+        expected_euler = recovery_module._euler_deg_from_orientation_matrices(
+            recovery_module._legacy_recovery_trial_matrices(0, 0.1)[None, ...],
+            np.asarray([[0.0, 0.0, 0.0]], dtype=np.float64),
+        )
+        symmetry_operators = recovery_module._resolve_recovery_symmetry_operators(RecoveryConfig())
+        misorientation = recovery_module._symmetry_misorientation_deg(
+            rotated,
+            expected_euler,
+            symmetry_operators,
+        )
+
+        self.assertLess(float(misorientation[0]), 1.0e-6)
+
+    def test_recovery_rotation_cap_uses_current_average_local_misorientation(self) -> None:
+        capped = recovery_module._recovery_rotation_cap_deg(
+            np.asarray([0.03, 4.5], dtype=np.float64),
+            theta_deg=0.1,
+        )
+
+        np.testing.assert_allclose(capped, np.asarray([0.03, 2.0], dtype=np.float64))
+
+    def test_recovery_grid_neighbours_keep_only_six_nearest_same_label_points(self) -> None:
+        grid_indices = np.asarray(
+            [
+                (ix, iy)
+                for ix in range(3)
+                for iy in range(3)
+            ],
+            dtype=np.int32,
+        )
+        label_values = np.zeros((9,), dtype=np.int32)
+
+        neighbours = recovery_module._grid_neighbour_indices(
+            grid_indices,
+            label_values,
+            4,
+            (3, 3),
+        )
+
+        self.assertEqual(len(neighbours), 6)
+        direct_neighbours = {1, 3, 5, 7}
+        self.assertTrue(direct_neighbours.issubset(set(int(value) for value in neighbours)))
+
+    def test_apply_recovery_stage_treats_hex_symmetry_equivalent_orientation_as_low_misorientation(self) -> None:
+        mesh_state = _build_recovery_mesh_state(
+            include_attr_f=False,
+            euler_values=(
+                (60.0, 0.0, 300.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+                (0.0, 0.0, 0.0),
+            ),
+        )
+        labels = np.zeros((2, 2), dtype=np.int32)
+
+        updated_mesh, recovery_stats = apply_recovery_stage(
+            mesh_state,
+            labels,
+            RecoveryConfig(high_angle_boundary_deg=5.0, trial_rotation_deg=0.1, rotation_mobility_length=50.0),
+            recovery_stage_index=0,
+        )
+
+        updated_fields = updated_mesh["_runtime_seed_unode_fields"]["values"]
+        updated_attr_f = np.asarray(updated_fields["U_ATTRIB_F"], dtype=np.float64)
+        self.assertTrue(np.all(updated_attr_f < 1.0e-3))
+        self.assertEqual(recovery_stats["rotated_unodes"], 0)
+
+    def test_apply_recovery_stage_reduces_u_dislocden_after_first_stage(self) -> None:
+        mesh_state = _build_recovery_mesh_state(include_attr_f=True, attr_f_value=2.0)
+        labels = np.zeros((2, 2), dtype=np.int32)
+
+        updated_mesh, recovery_stats = apply_recovery_stage(
+            mesh_state,
+            labels,
+            RecoveryConfig(high_angle_boundary_deg=5.0, trial_rotation_deg=0.1, rotation_mobility_length=50.0),
+            recovery_stage_index=1,
+        )
+
+        updated_density = np.asarray(updated_mesh["_runtime_seed_unode_fields"]["values"]["U_DISLOCDEN"])
+        self.assertTrue(np.any(updated_density < 10.0))
+        self.assertGreaterEqual(recovery_stats["density_reduced_unodes"], 1)
+
+    def test_apply_recovery_stage_updates_flynn_level_orientation_and_density_sections(self) -> None:
+        mesh_state = _build_recovery_mesh_state(include_attr_f=True, attr_f_value=2.0)
+        labels = np.zeros((2, 2), dtype=np.int32)
+
+        updated_mesh, _recovery_stats = apply_recovery_stage(
+            mesh_state,
+            labels,
+            RecoveryConfig(high_angle_boundary_deg=5.0, trial_rotation_deg=0.1, rotation_mobility_length=50.0),
+            recovery_stage_index=1,
+        )
+
+        flynn_values = updated_mesh["_runtime_seed_flynn_sections"]["values"]
+        updated_flynn_euler = np.asarray(flynn_values["EULER_3"], dtype=np.float64)
+        updated_flynn_density = np.asarray(flynn_values["DISLOCDEN"], dtype=np.float64)
+        self.assertEqual(updated_flynn_euler.shape, (1, 3))
+        self.assertGreater(float(np.linalg.norm(updated_flynn_euler[0])), 0.0)
+        self.assertLess(float(updated_flynn_density[0]), 10.0)
+
+    def test_apply_nucleation_stage_promotes_large_secondary_subgrain_cluster(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix >= 2 and iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(0.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "_runtime_seed_flynn_sections": {
+                "field_order": ("F_ATTRIB_C",),
+                "id_order": (11,),
+                "defaults": {"F_ATTRIB_C": (7.0,)},
+                "component_counts": {"F_ATTRIB_C": 1},
+                "values": {"F_ATTRIB_C": ((7.0,),)},
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11},
+            ],
+            "stats": {},
+        }
+
+        updated_labels, updated_mesh, stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4),
+        )
+
+        self.assertEqual(stats["nucleated_clusters"], 1)
+        self.assertEqual(stats["nucleated_unodes"], 4)
+        self.assertEqual(stats["new_labels_added"], 1)
+        self.assertEqual(int(np.max(updated_labels)), 1)
+        self.assertEqual(int(np.count_nonzero(updated_labels == 1)), 4)
+        self.assertNotIn("_runtime_label_overrides", updated_mesh)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_mesh_rebuilt"]), 1)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_incremental_label_handoff"]), 1)
+        self.assertEqual(int(updated_mesh["_runtime_incremental_label_remap_stages"]), 1)
+        self.assertEqual(len(updated_mesh["flynns"]), 2)
+        self.assertTrue(any(not bool(flynn.get("retained_identity", True)) for flynn in updated_mesh["flynns"]))
+        updated_label_values = np.asarray(
+            updated_mesh["_runtime_seed_unode_fields"]["values"]["U_ATTRIB_C"],
+            dtype=np.float64,
+        ).reshape(4, 4)
+        expected_source_labels = np.where(updated_labels == 1, 8.0, 7.0)
+        np.testing.assert_array_equal(updated_label_values, expected_source_labels)
+        self.assertEqual(updated_mesh["_runtime_seed_unode_fields"]["source_labels"], (7, 8))
+        current_flynn_sections = updated_mesh["_runtime_current_flynn_sections"]
+        self.assertEqual(tuple(current_flynn_sections["id_order"]), tuple(
+            int(flynn["flynn_id"]) for flynn in updated_mesh["flynns"]
+        ))
+        flynn_label_values = tuple(
+            float(entry[0]) for entry in current_flynn_sections["values"]["F_ATTRIB_C"]
+        )
+        self.assertIn(7.0, flynn_label_values)
+        self.assertIn(8.0, flynn_label_values)
+
+    def test_apply_nucleation_stage_sets_incremental_handoff_to_gbm_steps_per_subloop(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix >= 2 and iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(0.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11},
+            ],
+            "stats": {
+                "workflow_gbm_steps_per_subloop": 2,
+            },
+        }
+
+        _updated_labels, updated_mesh, _stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4),
+        )
+
+        self.assertEqual(int(updated_mesh["_runtime_incremental_label_remap_stages"]), 2)
+
+    def test_rebuild_mesh_state_from_nucleated_labels_preserves_existing_compact_labels(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        updated_labels = np.zeros((4, 4), dtype=np.int32)
+        updated_labels[0, 0] = 1
+        updated_labels[3, 3] = 1
+        mesh_state = build_mesh_state(current_labels)
+        mesh_state["_runtime_seed_unodes"] = {
+            "ids": tuple(range(16)),
+            "positions": tuple(
+                (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                for ix in range(4)
+                for iy in range(4)
+            ),
+            "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            "grid_shape": (4, 4),
+        }
+        mesh_state["_runtime_seed_flynn_sections"] = {
+            "field_order": ("F_ATTRIB_C",),
+            "id_order": tuple(int(flynn["flynn_id"]) for flynn in mesh_state["flynns"]),
+            "defaults": {"F_ATTRIB_C": (7.0,)},
+            "component_counts": {"F_ATTRIB_C": 1},
+            "values": {"F_ATTRIB_C": tuple((7.0,) for _ in mesh_state["flynns"])},
+        }
+        for flynn in mesh_state["flynns"]:
+            flynn["source_flynn_id"] = int(flynn["flynn_id"])
+
+        rebuilt = nucleation_module._rebuild_mesh_state_from_nucleated_labels(
+            mesh_state,
+            updated_labels,
+            (7, 8),
+        )
+
+        rebuilt_labels = [int(flynn["label"]) for flynn in rebuilt["flynns"]]
+        self.assertEqual(sorted(rebuilt_labels), [0, 1, 1])
+        self.assertEqual(tuple(rebuilt["_runtime_rebuilt_source_labels"]), (7, 8))
+        self.assertEqual(
+            np.asarray(rebuilt["_runtime_relabelled_labels"], dtype=np.int32).tolist(),
+            updated_labels.tolist(),
+        )
+        self.assertEqual(
+            len(tuple(rebuilt["_runtime_current_flynn_sections"]["id_order"])),
+            len(rebuilt["flynns"]),
+        )
+
+    def test_label_boundary_seed_mask_from_mesh_uses_boundary_node_proximity(self) -> None:
+        mesh_state = build_mesh_state(np.zeros((4, 4), dtype=np.int32))
+        label_mask = np.ones((4, 4), dtype=bool)
+        seed_position_grid = np.array(
+            [
+                [[0.05, 0.95], [0.05, 0.65], [0.05, 0.35], [0.05, 0.05]],
+                [[0.35, 0.95], [0.35, 0.65], [0.35, 0.35], [0.35, 0.05]],
+                [[0.65, 0.95], [0.65, 0.65], [0.65, 0.35], [0.65, 0.05]],
+                [[0.95, 0.95], [0.95, 0.65], [0.95, 0.35], [0.95, 0.05]],
+            ],
+            dtype=np.float64,
+        )
+
+        boundary_seed_mask = nucleation_module._label_boundary_seed_mask_from_mesh(
+            mesh_state,
+            0,
+            label_mask,
+            seed_position_grid,
+            max_distance=0.1,
+        )
+
+        self.assertTrue(bool(boundary_seed_mask[0, 0]))
+        self.assertTrue(bool(boundary_seed_mask[3, 0]))
+        self.assertFalse(bool(boundary_seed_mask[1, 0]))
+        self.assertFalse(bool(boundary_seed_mask[2, 0]))
+
+    def test_apply_nucleation_stage_skips_already_nucleated_source_flynn(self) -> None:
+        current_labels = np.array(
+            [
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix < 2:
+                    euler_values.append((0.0, 0.0, 0.0))
+                elif iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7, 8),
+                "values": {
+                    "U_ATTRIB_C": tuple(float(value) for value in current_labels.ravel()),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "_runtime_seed_flynn_sections": {
+                "field_order": ("F_ATTRIB_C",),
+                "id_order": (11, 12),
+                "defaults": {"F_ATTRIB_C": (7.0,)},
+                "component_counts": {"F_ATTRIB_C": 1},
+                "values": {"F_ATTRIB_C": ((7.0,), (8.0,))},
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 0.5, "y": 0.0, "neighbors": [0, 2], "flynns": [11, 12]},
+                {"node_id": 2, "x": 0.5, "y": 1.0, "neighbors": [1, 3], "flynns": [11, 12]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 4, "x": 1.0, "y": 0.0, "neighbors": [1, 5], "flynns": [12]},
+                {"node_id": 5, "x": 1.0, "y": 1.0, "neighbors": [4, 2], "flynns": [12]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11, "retained_identity": True},
+                {"flynn_id": 12, "label": 1, "node_ids": [1, 4, 5, 2], "source_flynn_id": 12, "retained_identity": False},
+            ],
+            "_runtime_nucleated_source_flynns": (11,),
+            "stats": {},
+        }
+
+        updated_labels, updated_mesh, stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=2),
+        )
+
+        self.assertEqual(stats["nucleated_clusters"], 0)
+        self.assertGreaterEqual(stats["skipped_repeated_sources"], 1)
+        np.testing.assert_array_equal(updated_labels, current_labels)
+        self.assertIs(updated_mesh, mesh_state)
+
+    def test_apply_nucleation_stage_rejects_pathological_mesh_rebuild(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix >= 2 and iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(0.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11, "retained_identity": True},
+            ],
+            "stats": {},
+        }
+
+        fake_rebuilt = {
+            "nodes": [],
+            "flynns": [{"flynn_id": i, "label": i, "node_ids": [0, 1, 2]} for i in range(10)],
+            "stats": {},
+            "events": [],
+        }
+
+        with patch("elle_jax_model.nucleation._rebuild_mesh_state_from_nucleated_labels", return_value=fake_rebuilt):
+            updated_labels, updated_mesh, stats = apply_nucleation_stage(
+                mesh_state,
+                current_labels,
+                NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4, max_mesh_rebuild_growth_factor=2.0),
+            )
+
+        self.assertEqual(stats["nucleated_clusters"], 1)
+        self.assertIn("_runtime_label_overrides", updated_mesh)
+        self.assertEqual(updated_mesh["_runtime_fallback_override_labels"], (1,))
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_mesh_rebuilt"]), 0)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_mesh_rebuild_rejected"]), 1)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_rebuild_candidate_flynns"]), 10)
+        self.assertTrue(np.any(np.asarray(updated_mesh["_runtime_label_overrides"], dtype=np.int32) >= 0))
+        self.assertEqual(updated_mesh["_runtime_seed_unode_fields"]["source_labels"], (7, 8))
+
+    def test_apply_nucleation_stage_retries_mesh_rebuild_after_connectivity_cleanup(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix >= 2 and iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(0.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11, "retained_identity": True},
+            ],
+            "stats": {},
+        }
+
+        fake_rebuilt_bad = {
+            "nodes": [],
+            "flynns": [{"flynn_id": i, "label": i, "node_ids": [0, 1, 2]} for i in range(10)],
+            "stats": {},
+            "events": [],
+        }
+        fake_rebuilt_good = {
+            "nodes": [],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2], "source_flynn_id": 11},
+                {"flynn_id": 12, "label": 1, "node_ids": [2, 3, 0], "source_flynn_id": 11},
+            ],
+            "stats": {},
+            "events": [],
+        }
+        cleaned_labels = current_labels.copy()
+        cleaned_labels[2:, 2:] = 1
+
+        with patch(
+            "elle_jax_model.nucleation._rebuild_mesh_state_from_nucleated_labels",
+            side_effect=[fake_rebuilt_bad, fake_rebuilt_good],
+        ), patch(
+            "elle_jax_model.nucleation._enforce_connected_label_ownership",
+            return_value=(cleaned_labels, {"connectivity_reassigned_unodes": 3, "connectivity_merged_components": 1}),
+        ):
+            updated_labels, updated_mesh, stats = apply_nucleation_stage(
+                mesh_state,
+                current_labels,
+                NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4, max_mesh_rebuild_growth_factor=2.0),
+            )
+
+        self.assertEqual(stats["nucleated_clusters"], 1)
+        np.testing.assert_array_equal(updated_labels, cleaned_labels)
+        self.assertNotIn("_runtime_label_overrides", updated_mesh)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_mesh_rebuild_retried"]), 1)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_pre_rebuild_connectivity_reassigned_unodes"]), 3)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_pre_rebuild_connectivity_merged_components"]), 1)
+        updated_label_values = np.asarray(
+            updated_mesh["_runtime_seed_unode_fields"]["values"]["U_ATTRIB_C"],
+            dtype=np.float64,
+        ).reshape(4, 4)
+        expected_source_labels = np.where(cleaned_labels == 1, 8.0, 7.0)
+        np.testing.assert_array_equal(updated_label_values, expected_source_labels)
+
+    def test_apply_nucleation_stage_skips_interior_secondary_cluster(self) -> None:
+        current_labels = np.zeros((6, 6), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(6):
+            for iy in range(6):
+                if 2 <= ix <= 3 and 2 <= iy <= 3:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(36)),
+                "positions": tuple(
+                    ((ix + 0.5) / 6.0, 1.0 - ((iy + 0.5) / 6.0))
+                    for ix in range(6)
+                    for iy in range(6)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(6) for iy in range(6)),
+                "grid_shape": (6, 6),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(7.0 for _ in range(36)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11},
+            ],
+            "stats": {},
+        }
+
+        updated_labels, updated_mesh, stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4),
+        )
+
+        np.testing.assert_array_equal(updated_labels, current_labels)
+        self.assertEqual(stats["nucleated_clusters"], 0)
+        self.assertGreaterEqual(stats["skipped_interior_clusters"], 1)
+        self.assertIs(updated_mesh, mesh_state)
+
+    def test_apply_nucleation_stage_skips_small_parent_flynn(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        for ix in range(4):
+            for iy in range(4):
+                if ix >= 2 and iy >= 2:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(
+                    (0.00125 + 0.0025 * ix, 0.00875 - 0.0025 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(7.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 0.01, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 0.01, "y": 0.01, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 0.01, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11},
+            ],
+            "stats": {},
+        }
+
+        updated_labels, updated_mesh, stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4, parent_area_crit=5.0e-4),
+        )
+
+        np.testing.assert_array_equal(updated_labels, current_labels)
+        self.assertEqual(stats["nucleated_clusters"], 0)
+        self.assertGreaterEqual(stats["skipped_small_parent_flynns"], 1)
+        self.assertIs(updated_mesh, mesh_state)
+
+    def test_apply_nucleation_stage_uses_boundary_local_critical_seed_patch(self) -> None:
+        current_labels = np.zeros((6, 6), dtype=np.int32)
+        euler_values: list[tuple[float, float, float]] = []
+        attr_f_values: list[float] = []
+        for ix in range(6):
+            for iy in range(6):
+                if ix < 4 and iy < 4:
+                    euler_values.append((25.0, 0.0, 0.0))
+                else:
+                    euler_values.append((0.0, 0.0, 0.0))
+                attr_f_values.append(10.0 if (ix, iy) == (0, 0) else 0.0)
+
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(36)),
+                "positions": tuple(
+                    ((ix + 0.5) / 6.0, 1.0 - ((iy + 0.5) / 6.0))
+                    for ix in range(6)
+                    for iy in range(6)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(6) for iy in range(6)),
+                "grid_shape": (6, 6),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (7,),
+                "values": {
+                    "U_ATTRIB_C": tuple(7.0 for _ in range(36)),
+                    "U_ATTRIB_F": tuple(attr_f_values),
+                    "U_DISLOCDEN": tuple(1.0 for _ in range(36)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "values": {
+                    "U_EULER_3": tuple(euler_values),
+                },
+            },
+            "nodes": [
+                {"node_id": 0, "x": 0.0, "y": 0.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 1, "x": 1.0, "y": 0.0, "neighbors": [0, 2], "flynns": [11]},
+                {"node_id": 2, "x": 1.0, "y": 1.0, "neighbors": [1, 3], "flynns": [11]},
+                {"node_id": 3, "x": 0.0, "y": 1.0, "neighbors": [0, 2], "flynns": [11]},
+            ],
+            "flynns": [
+                {"flynn_id": 11, "label": 0, "node_ids": [0, 1, 2, 3], "source_flynn_id": 11},
+            ],
+            "stats": {},
+        }
+
+        updated_labels, updated_mesh, stats = apply_nucleation_stage(
+            mesh_state,
+            current_labels,
+            NucleationConfig(high_angle_boundary_deg=5.0, min_cluster_unodes=4),
+        )
+
+        promoted_mask = updated_labels == int(np.max(updated_labels))
+        expected_mask = np.zeros_like(current_labels, dtype=bool)
+        expected_mask[0:2, 0:2] = True
+        np.testing.assert_array_equal(promoted_mask, expected_mask)
+        self.assertEqual(stats["nucleated_clusters"], 1)
+        self.assertGreaterEqual(stats["trimmed_cluster_unodes"], 1)
+        self.assertEqual(int(updated_mesh["stats"]["nucleation_trimmed_cluster_unodes"]), int(stats["trimmed_cluster_unodes"]))
+
+    def test_enforce_connected_label_ownership_reassigns_smaller_fragment(self) -> None:
+        labels = np.array(
+            [
+                [1, 0, 0],
+                [0, 0, 0],
+                [0, 0, 1],
+            ],
+            dtype=np.int32,
+        )
+        stabilized, stats = _enforce_connected_label_ownership(
+            labels,
+            reference_labels=np.zeros_like(labels, dtype=np.int32),
+            protected_labels=(1,),
+        )
+
+        self.assertEqual(int(stats["connectivity_reassigned_unodes"]), 1)
+        self.assertEqual(int(stats["connectivity_merged_components"]), 1)
+        self.assertEqual(int(np.count_nonzero(stabilized == 1)), 1)
+        self.assertEqual(int(np.max(stabilized)), 1)
+
+    def test_enforce_connected_label_ownership_keeps_large_secondary_component(self) -> None:
+        labels = np.array(
+            [
+                [1, 1, 0, 0],
+                [1, 1, 0, 0],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        stabilized, stats = _enforce_connected_label_ownership(
+            labels,
+            reference_labels=np.zeros_like(labels, dtype=np.int32),
+            merge_max_component_size=3,
+        )
+
+        np.testing.assert_array_equal(stabilized, labels)
+        self.assertEqual(int(stats["connectivity_reassigned_unodes"]), 0)
+        self.assertEqual(int(stats["connectivity_merged_components"]), 0)
+
+    def test_stabilize_label_identities_preserves_reference_ids_under_permutation(self) -> None:
+        reference = np.array(
+            [
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [2, 2, 3, 3],
+                [2, 2, 3, 3],
+            ],
+            dtype=np.int32,
+        )
+        candidate = np.array(
+            [
+                [2, 2, 3, 3],
+                [2, 2, 3, 3],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+
+        stabilized, stats = mesh_module._stabilize_label_identities(reference, candidate)
+
+        np.testing.assert_array_equal(stabilized, reference)
+        self.assertEqual(int(stats["identity_stabilized_labels"]), 4)
+        self.assertEqual(int(stats["identity_stabilized_pixels"]), 16)
+
+    def test_stabilize_label_identities_keeps_new_split_label_unique(self) -> None:
+        reference = np.array(
+            [
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        candidate = np.array(
+            [
+                [2, 2, 1, 1],
+                [2, 2, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+
+        stabilized, stats = mesh_module._stabilize_label_identities(reference, candidate)
+
+        self.assertEqual(set(np.unique(stabilized).tolist()), {0, 1, 2})
+        np.testing.assert_array_equal(stabilized[:2, :2], np.full((2, 2), 2, dtype=np.int32))
+        self.assertEqual(int(stats["identity_stabilized_labels"]), 0)
+        self.assertEqual(int(stats["identity_stabilized_pixels"]), 0)
+
+    def test_run_faithful_gbm_simulation_can_bundle_multiple_gbm_stages_per_snapshot(self) -> None:
+        contexts: list[dict[str, object]] = []
+        stage_calls: list[int] = []
+
+        def record_snapshot(_step, _phi, _topology_snapshot, mesh_feedback_context) -> None:
+            contexts.append(dict(mesh_feedback_context))
+
+        def fake_couple(phi, mesh_feedback, tracked_topology=None, base_mesh_state=None):
+            del tracked_topology
+            stage_calls.append(len(stage_calls) + 1)
+            mesh_state = copy.deepcopy(
+                base_mesh_state if base_mesh_state is not None else mesh_feedback.initial_mesh_state
+            )
+            if mesh_state is None:
+                mesh_state = {"stats": {}}
+            mesh_state.setdefault("stats", {})
+            mesh_state["stats"]["fake_stage_call"] = len(stage_calls)
+            return np.asarray(phi, dtype=np.float32), mesh_state, {"fake_stage_call": len(stage_calls)}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
+            with patch("elle_jax_model.faithful_runtime.couple_mesh_to_order_parameters", side_effect=fake_couple):
+                _final_state, snapshots, _topology_history = run_faithful_gbm_simulation(
+                    init_elle_path=elle_path,
+                    steps=2,
+                    save_every=1,
+                    mesh_relax_steps=0,
+                    mesh_topology_steps=0,
+                    subloops_per_snapshot=2,
+                    gbm_steps_per_subloop=3,
+                    on_snapshot=record_snapshot,
+                )
+
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(len(stage_calls), 12)
+        self.assertEqual(contexts[0]["outer_step"], 1)
+        self.assertEqual(contexts[0]["stage_index"], 6)
+        self.assertEqual(contexts[0]["stages_per_snapshot"], 6)
+        self.assertEqual(contexts[0]["subloops_per_snapshot"], 2)
+        self.assertEqual(contexts[0]["gbm_steps_per_subloop"], 3)
+        self.assertEqual(contexts[1]["outer_step"], 2)
+        self.assertEqual(contexts[1]["stage_index"], 12)
+        self.assertEqual(contexts[1]["mesh_state"]["stats"]["workflow_stages_per_snapshot"], 6)
+
+    def test_run_faithful_gbm_simulation_can_include_recovery_stages_per_subloop(self) -> None:
+        contexts: list[dict[str, object]] = []
+        gbm_calls: list[int] = []
+        recovery_calls: list[int] = []
+
+        def record_snapshot(_step, _phi, _topology_snapshot, mesh_feedback_context) -> None:
+            contexts.append(dict(mesh_feedback_context))
+
+        def fake_couple(phi, mesh_feedback, tracked_topology=None, base_mesh_state=None):
+            del tracked_topology
+            gbm_calls.append(len(gbm_calls) + 1)
+            mesh_state = copy.deepcopy(
+                base_mesh_state if base_mesh_state is not None else mesh_feedback.initial_mesh_state
+            )
+            if mesh_state is None:
+                mesh_state = {"stats": {}}
+            mesh_state.setdefault("stats", {})
+            return np.asarray(phi, dtype=np.float32), mesh_state, {"fake_stage_call": len(gbm_calls)}
+
+        def fake_recovery(mesh_state, current_labels, config, *, recovery_stage_index=0):
+            del current_labels, config
+            recovery_calls.append(int(recovery_stage_index))
+            mesh_copy = copy.deepcopy(mesh_state)
+            mesh_copy.setdefault("stats", {})
+            mesh_copy["stats"]["fake_recovery_stage_index"] = int(recovery_stage_index)
+            return mesh_copy, {
+                "recovery_stage_index": int(recovery_stage_index),
+                "recovery_applied": 1,
+                "rotated_unodes": int(recovery_stage_index + 1),
+                "density_reduced_unodes": int(recovery_stage_index),
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
+            with patch("elle_jax_model.faithful_runtime.couple_mesh_to_order_parameters", side_effect=fake_couple):
+                with patch("elle_jax_model.faithful_runtime.apply_recovery_stage", side_effect=fake_recovery):
+                    _final_state, snapshots, _topology_history = run_faithful_gbm_simulation(
+                        init_elle_path=elle_path,
+                        steps=1,
+                        save_every=1,
+                        mesh_relax_steps=0,
+                        mesh_topology_steps=0,
+                        subloops_per_snapshot=2,
+                        gbm_steps_per_subloop=3,
+                        recovery_steps_per_subloop=2,
+                        on_snapshot=record_snapshot,
+                    )
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(len(gbm_calls), 6)
+        self.assertEqual(recovery_calls, [0, 1, 0, 1])
+        self.assertEqual(contexts[0]["stage_kind"], "recovery")
+        self.assertEqual(contexts[0]["stage_index"], 10)
+        self.assertEqual(contexts[0]["stages_per_snapshot"], 10)
+        self.assertEqual(contexts[0]["recovery_steps_per_subloop"], 2)
+        self.assertEqual(
+            contexts[0]["recovery_cumulative_stats"]["recovery_applied_stages_total"],
+            4,
+        )
+        self.assertEqual(
+            contexts[0]["recovery_cumulative_stats"]["recovery_rotated_unodes_total"],
+            6,
+        )
+        self.assertEqual(
+            contexts[0]["recovery_cumulative_stats"]["recovery_density_reduced_unodes_total"],
+            2,
+        )
+        self.assertEqual(
+            contexts[0]["mesh_state"]["stats"]["workflow_recovery_rotated_unodes_total"],
+            6,
+        )
+
+    def test_run_faithful_gbm_simulation_can_include_nucleation_stages_per_subloop(self) -> None:
+        contexts: list[dict[str, object]] = []
+        gbm_calls: list[int] = []
+        nucleation_calls: list[int] = []
+
+        def record_snapshot(_step, _phi, _topology_snapshot, mesh_feedback_context) -> None:
+            contexts.append(dict(mesh_feedback_context))
+
+        def fake_couple(phi, mesh_feedback, tracked_topology=None, base_mesh_state=None):
+            del tracked_topology
+            gbm_calls.append(len(gbm_calls) + 1)
+            mesh_state = copy.deepcopy(
+                base_mesh_state if base_mesh_state is not None else mesh_feedback.initial_mesh_state
+            )
+            if mesh_state is None:
+                mesh_state = {"stats": {}}
+            mesh_state.setdefault("stats", {})
+            return np.asarray(phi, dtype=np.float32), mesh_state, {"fake_stage_call": len(gbm_calls)}
+
+        def fake_nucleation(mesh_state, current_labels, config, *, nucleation_stage_index=0):
+            del current_labels, config
+            nucleation_calls.append(int(nucleation_stage_index))
+            mesh_copy = copy.deepcopy(mesh_state)
+            mesh_copy.setdefault("stats", {})
+            mesh_copy["stats"]["fake_nucleation_stage_index"] = int(nucleation_stage_index)
+            labels = np.zeros((2, 2), dtype=np.int32)
+            return labels, mesh_copy, {
+                "nucleation_stage_index": int(nucleation_stage_index),
+                "nucleation_applied": 1,
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "seed.elle")
+            with patch("elle_jax_model.faithful_runtime.couple_mesh_to_order_parameters", side_effect=fake_couple):
+                with patch("elle_jax_model.faithful_runtime.apply_nucleation_stage", side_effect=fake_nucleation):
+                    _final_state, snapshots, _topology_history = run_faithful_gbm_simulation(
+                        init_elle_path=elle_path,
+                        steps=1,
+                        save_every=1,
+                        mesh_relax_steps=0,
+                        mesh_topology_steps=0,
+                        subloops_per_snapshot=2,
+                        nucleation_steps_per_subloop=2,
+                        gbm_steps_per_subloop=1,
+                        on_snapshot=record_snapshot,
+                    )
+
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(len(gbm_calls), 2)
+        self.assertEqual(nucleation_calls, [0, 1, 0, 1])
+        self.assertEqual(contexts[0]["stage_kind"], "gbm")
+        self.assertEqual(contexts[0]["stage_index"], 6)
+        self.assertEqual(contexts[0]["stages_per_snapshot"], 6)
+        self.assertEqual(contexts[0]["nucleation_steps_per_subloop"], 2)
+        self.assertEqual(contexts[0]["gbm_steps_per_subloop"], 1)
 
     def test_resolve_runtime_preset_preserves_manual_params_when_none(self) -> None:
         params = resolve_runtime_preset(
@@ -1149,10 +2806,48 @@ class SimulationTests(unittest.TestCase):
         self.assertGreaterEqual(seed["num_labels"], 130)
         self.assertEqual(tuple(seed["grid_shape"]), (128, 128))
 
+    def test_load_elle_label_seed_auto_prefers_u_attrib_c_when_integer_like(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = Path(tmpdir) / "auto_prefers_c.elle"
+            elle_path.write_text(
+                "\n".join(
+                    [
+                        "OPTIONS",
+                        "LOCATION",
+                        "1 0.0 0.0",
+                        "2 1.0 0.0",
+                        "3 1.0 1.0",
+                        "4 0.0 1.0",
+                        "FLYNNS",
+                        "1 4 1 2 3 4",
+                        "UNODES",
+                        "1 0.25 0.25",
+                        "2 0.25 0.75",
+                        "3 0.75 0.25",
+                        "4 0.75 0.75",
+                        "U_ATTRIB_B",
+                        "Default 0.0",
+                        "1 10",
+                        "2 20",
+                        "U_ATTRIB_C",
+                        "Default 0.0",
+                        "1 100",
+                        "2 100",
+                        "3 200",
+                        "4 200",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            seed = load_elle_label_seed(elle_path)
+
+        self.assertEqual(seed["attribute"], "U_ATTRIB_C")
+
     def test_load_elle_mesh_seed_maps_original_flynns_and_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "mesh_seed.elle")
-            label_seed = load_elle_label_seed(elle_path)
+            label_seed = load_elle_label_seed(elle_path, attribute="U_ATTRIB_C")
             mesh_state, relax_overrides = load_elle_mesh_seed(elle_path, label_seed)
 
         self.assertEqual(label_seed["attribute"], "U_ATTRIB_C")
@@ -1161,6 +2856,7 @@ class SimulationTests(unittest.TestCase):
         self.assertAlmostEqual(relax_overrides["switch_distance"], 0.05)
         self.assertAlmostEqual(relax_overrides["min_node_separation_factor"], 1.0)
         self.assertAlmostEqual(relax_overrides["max_node_separation_factor"], 2.2)
+        self.assertAlmostEqual(relax_overrides["time_step"], 3.0)
         self.assertAlmostEqual(relax_overrides["speed_up"], 2.0)
         self.assertEqual(
             sorted(flynn["label"] for flynn in mesh_state["flynns"]),
@@ -1172,9 +2868,41 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(mesh_state["_runtime_seed_unode_fields"]["label_attribute"], "U_ATTRIB_C")
         self.assertIn("U_ATTRIB_A", mesh_state["_runtime_seed_unode_fields"]["values"])
         self.assertGreater(mesh_state["_runtime_seed_unode_fields"]["roi"], 0.0)
+        self.assertIn("_runtime_seed_unode_sections", mesh_state)
+        self.assertIn("U_ATTRIB_A", mesh_state["_runtime_seed_unode_sections"]["values"])
         self.assertIn("_runtime_seed_node_fields", mesh_state)
         self.assertIn("N_ATTRIB_A", mesh_state["_runtime_seed_node_fields"]["values"])
         self.assertEqual(len(mesh_state["_runtime_seed_node_fields"]["values"]["N_ATTRIB_A"]), 6)
+        self.assertIn("_runtime_seed_node_sections", mesh_state)
+        self.assertIn("_runtime_seed_flynn_sections", mesh_state)
+
+    def test_update_seed_unode_fields_skips_swept_geometry_when_only_generic_scalar_fields_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "mesh_seed.elle")
+            label_seed = load_elle_label_seed(elle_path, attribute="U_ATTRIB_C")
+            mesh_state, _ = load_elle_mesh_seed(elle_path, label_seed)
+
+        current_labels = np.asarray(label_seed["label_field"], dtype=np.int32)
+        target_labels = current_labels.copy()
+        target_labels[0, 0] = current_labels[0, 1]
+
+        with patch("elle_jax_model.mesh._compute_swept_seed_unode_mask", side_effect=AssertionError("should not compute swept mask")):
+            with patch("elle_jax_model.mesh._segment_swept_records", side_effect=AssertionError("should not build segment records")):
+                updated_fields, stats, mass_ledgers = update_seed_unode_fields(
+                    current_labels,
+                    target_labels,
+                    mesh_state,
+                    mesh_state,
+                    mesh_state["_runtime_seed_unodes"],
+                    mesh_state["_runtime_seed_unode_fields"],
+                    node_fields=mesh_state["_runtime_seed_node_fields"],
+                )
+
+        self.assertIn("U_ATTRIB_A", updated_fields)
+        self.assertIn("U_ATTRIB_C", updated_fields)
+        self.assertEqual(stats["mass_partitioned_fields"], 0)
+        self.assertEqual(stats["scalar_swept_unodes"], 0)
+        self.assertEqual(mass_ledgers, {})
 
     def test_initialize_order_parameters_supports_elle_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1289,7 +3017,7 @@ class SimulationTests(unittest.TestCase):
     def test_write_unode_elle_preserves_seed_unode_fields_for_truthful_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "mesh_seed.elle")
-            label_seed = load_elle_label_seed(elle_path)
+            label_seed = load_elle_label_seed(elle_path, attribute="U_ATTRIB_C")
             mesh_state, _ = load_elle_mesh_seed(elle_path, label_seed)
             labels = np.asarray(label_seed["label_field"], dtype=np.int32)
             phi = mesh_labels_to_order_parameters(labels, int(label_seed["num_labels"]))
@@ -1311,6 +3039,129 @@ class SimulationTests(unittest.TestCase):
         self.assertIn("1 0.2500000000 0.2500000000", text)
         self.assertIn("1 1.00000000e+00", text)
         self.assertIn("1 1.00000000e+02", text)
+
+    def test_write_unode_elle_preserves_defaults_and_multicomponent_seed_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "mesh_seed.elle")
+            text = elle_path.read_text(encoding="utf-8")
+            text = text.replace(
+                "U_ATTRIB_A\nDefault 0.0\n1 1.0\n2 2.0\n3 3.0\n4 4.0\nU_ATTRIB_C",
+                "U_ATTRIB_A\nDefault 3.0\n1 4.0\nU_EULER_3\nDefault 0.0 0.0 0.0\n1 10.0 20.0 30.0\n2 40.0 50.0 60.0\nU_ATTRIB_C",
+            )
+            elle_path.write_text(text, encoding="utf-8")
+            label_seed = load_elle_label_seed(elle_path, attribute="U_ATTRIB_C")
+            mesh_state, _ = load_elle_mesh_seed(elle_path, label_seed)
+            labels = np.asarray(label_seed["label_field"], dtype=np.int32)
+            phi = mesh_labels_to_order_parameters(labels, int(label_seed["num_labels"]))
+
+            outpath = write_unode_elle(
+                Path(tmpdir) / "truthful_multicomponent.elle",
+                phi,
+                step=0,
+                mesh_state=mesh_state,
+            )
+            exported = outpath.read_text(encoding="utf-8")
+
+        self.assertIn("U_ATTRIB_A\nDefault 3.00000000e+00\n", exported)
+        self.assertIn("\n1 4.00000000e+00\n", exported)
+        self.assertNotIn("\n2 3.00000000e+00\n", exported)
+        self.assertIn("U_EULER_3\nDefault 0.00000000e+00 0.00000000e+00 0.00000000e+00\n", exported)
+        self.assertIn("\n1 1.00000000e+01 2.00000000e+01 3.00000000e+01\n", exported)
+        self.assertIn("\n2 4.00000000e+01 5.00000000e+01 6.00000000e+01\n", exported)
+
+    def test_write_unode_elle_prefers_runtime_label_field_over_stale_section_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elle_path = _write_elle_mesh_seed_example(Path(tmpdir) / "mesh_seed.elle")
+            label_seed = load_elle_label_seed(elle_path, attribute="U_ATTRIB_C")
+            mesh_state, _ = load_elle_mesh_seed(elle_path, label_seed)
+            labels = np.asarray(label_seed["label_field"], dtype=np.int32)
+            phi = mesh_labels_to_order_parameters(labels, int(label_seed["num_labels"]))
+
+            runtime_fields = dict(mesh_state["_runtime_seed_unode_fields"]["values"])
+            runtime_fields["U_ATTRIB_C"] = tuple(900.0 + float(index) for index in range(len(runtime_fields["U_ATTRIB_C"])))
+            mesh_state["_runtime_seed_unode_fields"] = {
+                **mesh_state["_runtime_seed_unode_fields"],
+                "values": runtime_fields,
+            }
+
+            runtime_sections = dict(mesh_state["_runtime_seed_unode_sections"]["values"])
+            stale_values = tuple((111.0,) for _ in range(len(runtime_fields["U_ATTRIB_C"])))
+            runtime_sections["U_ATTRIB_C"] = stale_values
+            mesh_state["_runtime_seed_unode_sections"] = {
+                **mesh_state["_runtime_seed_unode_sections"],
+                "values": runtime_sections,
+            }
+
+            outpath = write_unode_elle(
+                Path(tmpdir) / "truthful_label_override.elle",
+                phi,
+                step=0,
+                mesh_state=mesh_state,
+            )
+            exported = outpath.read_text(encoding="utf-8")
+
+        self.assertIn("U_ATTRIB_C\n", exported)
+        self.assertIn("1 9.00000000e+02", exported)
+        self.assertIn("2 9.01000000e+02", exported)
+        self.assertNotIn("1 1.11000000e+02", exported)
+
+    def test_write_unode_elle_dense_exports_fallback_unode_labels(self) -> None:
+        labels = np.asarray([[0, 1], [1, 1]], dtype=np.int32)
+        phi = mesh_labels_to_order_parameters(labels, 2)
+        mesh_state = {
+            "nodes": (
+                {"node_id": 0, "x": 0.0, "y": 0.0},
+                {"node_id": 1, "x": 1.0, "y": 0.0},
+                {"node_id": 2, "x": 1.0, "y": 1.0},
+            ),
+            "flynns": (
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2]},
+            ),
+            "stats": {
+                "num_flynns": 1,
+                "holes_skipped": 0,
+                "export_dense_unodes": 1,
+            },
+            "_runtime_seed_unodes": {
+                "ids": (10, 11, 12),
+                "positions": ((0.25, 0.75), (0.75, 0.75), (0.75, 0.25)),
+                "grid_indices": ((0, 0), (1, 0), (1, 1)),
+                "grid_shape": (2, 2),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "field_order": ("U_ATTRIB_C", "U_ATTRIB_A"),
+                "source_labels": (100, 200),
+                "values": {
+                    "U_ATTRIB_C": (100.0, 200.0, 200.0),
+                    "U_ATTRIB_A": (1.0, 2.0, 3.0),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "id_order": (10, 11, 12),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": ((100.0,), (200.0,), (200.0,)),
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outpath = write_unode_elle(
+                Path(tmpdir) / "fallback_dense.elle",
+                phi,
+                step=1,
+                mesh_state=mesh_state,
+            )
+            exported_seed = load_elle_label_seed(outpath, attribute="U_ATTRIB_C")
+            exported_text = outpath.read_text(encoding="utf-8")
+
+        np.testing.assert_array_equal(np.asarray(exported_seed["label_field"], dtype=np.int32), labels)
+        self.assertEqual(len(exported_seed["unode_ids"]), 4)
+        self.assertIn("0 0.2500000000 0.2500000000", exported_text)
+        self.assertIn("3 0.7500000000 0.7500000000", exported_text)
 
     def test_extract_flynn_topology_returns_shared_nodes(self) -> None:
         labels = np.array(
@@ -1451,6 +3302,26 @@ class SimulationTests(unittest.TestCase):
         self.assertFalse(second["events"]["births"])
         self.assertFalse(second["events"]["deaths"])
 
+    def test_topology_tracker_can_reuse_previous_snapshot_without_recomputing(self) -> None:
+        labels = np.array(
+            [
+                [0, 0, 1],
+                [0, 0, 1],
+            ],
+            dtype=np.int32,
+        )
+        tracker = TopologyTracker()
+        first = tracker.update(labels, step=1)
+        reused = tracker.reuse_previous(step=2)
+
+        self.assertEqual(reused["step"], 2)
+        self.assertEqual(
+            [flynn["flynn_id"] for flynn in first["flynns"]],
+            [flynn["flynn_id"] for flynn in reused["flynns"]],
+        )
+        self.assertEqual(first["events"], reused["events"])
+        self.assertEqual(len(tracker.history), 2)
+
     def test_topology_tracker_reports_split_events(self) -> None:
         tracker = TopologyTracker()
         tracker.update(
@@ -1555,6 +3426,7 @@ class SimulationTests(unittest.TestCase):
         switch_distance = 0.05
 
         force_cardinal = _surface_force_from_trial_energies(
+            0,
             node_xy,
             ordered_neighbors,
             nodes,
@@ -1563,6 +3435,7 @@ class SimulationTests(unittest.TestCase):
             use_diagonal_trials=False,
         )
         force_diagonal = _surface_force_from_trial_energies(
+            0,
             node_xy,
             ordered_neighbors,
             nodes,
@@ -1624,12 +3497,13 @@ class SimulationTests(unittest.TestCase):
 
     def test_elle_surface_effective_dt_resets_speedup_before_clamp(self) -> None:
         dt = _elle_surface_effective_dt(
-            velocity_length=0.04,
+            velocity_length=0.004,
             switch_distance=0.05,
+            time_step=10.0,
             speed_up=2.0,
         )
 
-        self.assertAlmostEqual(dt, 1.0)
+        self.assertAlmostEqual(dt, 10.0)
 
     def test_elle_surface_velocity_from_force_uses_elle_denominator(self) -> None:
         force = np.array([3.0, 4.0], dtype=np.float64)
@@ -1660,6 +3534,128 @@ class SimulationTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(velocity, expected))
 
+    def test_elle_surface_velocity_from_force_scales_with_force_magnitude(self) -> None:
+        force_a = np.array([3.0, 4.0], dtype=np.float64)
+        force_b = 10.0 * force_a
+        node_xy = np.array([0.50, 0.50], dtype=np.float64)
+        nodes = np.array(
+            [
+                [0.50, 0.50],
+                [0.75, 0.50],
+                [0.50, 0.80],
+            ],
+            dtype=np.float64,
+        )
+        ordered_neighbors = [1, 2]
+
+        velocity_a = _elle_surface_velocity_from_force(
+            force_a,
+            node_xy,
+            ordered_neighbors,
+            nodes,
+            unit_length=0.03,
+            segment_mobilities=[2.0, 0.5],
+        )
+        velocity_b = _elle_surface_velocity_from_force(
+            force_b,
+            node_xy,
+            ordered_neighbors,
+            nodes,
+            unit_length=0.03,
+            segment_mobilities=[2.0, 0.5],
+        )
+
+        self.assertTrue(np.allclose(velocity_b, 10.0 * velocity_a))
+
+    def test_load_phase_boundary_db_reads_original_pair_data(self) -> None:
+        phase_db = load_phase_boundary_db()
+
+        self.assertEqual(phase_db.first_phase, 1)
+        self.assertEqual(phase_db.no_phases, 2)
+        self.assertAlmostEqual(phase_db.pairs[(1, 2)].mobility, 0.0032)
+        self.assertAlmostEqual(phase_db.pairs[(1, 2)].boundary_energy, 0.52)
+        self.assertAlmostEqual(phase_db.pairs[(1, 2)].activation_energy, 51.1e3)
+        self.assertAlmostEqual(phase_db.cluster_multiplier_a, 0.001)
+        self.assertAlmostEqual(phase_db.cluster_multiplier_d, 2.0)
+
+    def test_boundary_segment_mobility_matches_old_arrhenius_formula(self) -> None:
+        phase_db = load_phase_boundary_db()
+        mobility = boundary_segment_mobility(
+            phase_db,
+            1,
+            2,
+            temperature_c=25.0,
+        )
+        expected = arrhenius_boundary_mobility(0.0032, 51.1e3, temperature_c=25.0)
+        self.assertAlmostEqual(mobility, expected)
+
+    def test_build_edge_mobility_lookup_uses_phase_pairs_and_misorientation(self) -> None:
+        mesh_state = {
+            "nodes": [
+                {"x": 0.50, "y": 0.50},
+                {"x": 0.75, "y": 0.50},
+                {"x": 0.60, "y": 0.70},
+                {"x": 0.60, "y": 0.30},
+            ],
+            "flynns": [
+                {
+                    "flynn_id": 10,
+                    "source_flynn_id": 10,
+                    "label": 0,
+                    "node_ids": [0, 1, 2],
+                },
+                {
+                    "flynn_id": 20,
+                    "source_flynn_id": 20,
+                    "label": 1,
+                    "node_ids": [1, 0, 3],
+                },
+            ],
+            "_runtime_seed_flynn_sections": {
+                "field_order": ("VISCOSITY", "EULER_3"),
+                "id_order": (10, 20),
+                "defaults": {
+                    "VISCOSITY": (1.0,),
+                    "EULER_3": (0.0, 0.0, 0.0),
+                },
+                "component_counts": {
+                    "VISCOSITY": 1,
+                    "EULER_3": 3,
+                },
+                "values": {
+                    "VISCOSITY": ((1.0,), (2.0,)),
+                    "EULER_3": ((0.0, 0.0, 0.0), (0.0, 5.0, 0.0)),
+                },
+            },
+        }
+        edge_map = {
+            (0, 1): [(0, 0), (1, 0)],
+        }
+
+        lookup = _build_edge_mobility_lookup(
+            mesh_state,
+            mesh_state["flynns"],
+            edge_map,
+            phase_db_path=None,
+            temperature_c=25.0,
+        )
+
+        phase_db = load_phase_boundary_db()
+        misorientation = caxis_misorientation_degrees((0.0, 0.0, 0.0), (0.0, 5.0, 0.0))
+        expected = boundary_segment_mobility(
+            phase_db,
+            1,
+            2,
+            temperature_c=25.0,
+            misorientation_degrees=misorientation,
+        )
+        self.assertAlmostEqual(lookup[(0, 1)], expected)
+        self.assertLess(lookup[(0, 1)], boundary_segment_mobility(phase_db, 1, 2, temperature_c=25.0))
+
+    def test_misorientation_mobility_reduction_matches_holm_style_cutoff(self) -> None:
+        self.assertAlmostEqual(misorientation_mobility_reduction(25.0), 1.0)
+        self.assertLess(misorientation_mobility_reduction(5.0), 1.0)
+
     def test_move_node_elle_surface_matches_getmovedir_axis_gate(self) -> None:
         node_xy = np.array([0.50, 0.50], dtype=np.float64)
         nodes = np.array(
@@ -1673,6 +3669,7 @@ class SimulationTests(unittest.TestCase):
         ordered_neighbors = [1, 2]
 
         force = _surface_force_from_trial_energies(
+            0,
             node_xy,
             ordered_neighbors,
             nodes,
@@ -1681,6 +3678,7 @@ class SimulationTests(unittest.TestCase):
             use_diagonal_trials=False,
         )
         increment = _move_node_elle_surface(
+            0,
             node_xy,
             ordered_neighbors,
             nodes,
@@ -1693,6 +3691,269 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(abs(float(force[0])), 1.0e-6)
         self.assertAlmostEqual(float(force[1]), 0.0, places=12)
         self.assertTrue(np.allclose(increment, np.zeros(2, dtype=np.float64)))
+
+    def test_surface_force_from_trial_energies_can_include_stored_energy_term(self) -> None:
+        node_xy = np.array([0.50, 0.50], dtype=np.float64)
+        nodes = np.array(
+            [
+                [0.50, 0.50],
+                [0.50, 0.80],
+                [0.50, 0.20],
+                [0.90, 0.80],
+                [0.90, 0.20],
+                [0.10, 0.20],
+                [0.10, 0.80],
+            ],
+            dtype=np.float64,
+        )
+        flynns = [
+            {"flynn_id": 10, "source_flynn_id": 10, "label": 0, "node_ids": [0, 1, 3, 4, 2]},
+            {"flynn_id": 20, "source_flynn_id": 20, "label": 1, "node_ids": [0, 2, 5, 6, 1]},
+        ]
+        seed_positions = []
+        seed_grid_indices = []
+        density_values = []
+        for ix in range(4):
+            for iy in range(4):
+                x = (ix + 0.5) / 4.0
+                y = 1.0 - (iy + 0.5) / 4.0
+                seed_positions.append((x, y))
+                seed_grid_indices.append((ix, iy))
+                density_values.append(10.0 if x > 0.5 else 1.0)
+        mesh_state = {
+            "_runtime_seed_unodes": {
+                "ids": tuple(range(16)),
+                "positions": tuple(seed_positions),
+                "grid_indices": tuple(seed_grid_indices),
+                "grid_shape": (4, 4),
+            },
+            "_runtime_seed_unode_fields": {
+                "values": {
+                    "U_DISLOCDEN": tuple(density_values),
+                },
+            },
+            "_runtime_seed_flynn_sections": {
+                "field_order": ("VISCOSITY",),
+                "id_order": (10, 20),
+                "defaults": {"VISCOSITY": (1.0,)},
+                "component_counts": {"VISCOSITY": 1},
+                "values": {
+                    "VISCOSITY": ((1.0,), (1.0,)),
+                },
+            },
+            "stats": {"grid_shape": [4, 4]},
+        }
+        stored_energy_context = mesh_module._build_stored_energy_context(mesh_state, nodes, flynns)
+
+        force = _surface_force_from_trial_energies(
+            0,
+            node_xy,
+            [1, 2],
+            nodes,
+            flynns=flynns,
+            switch_distance=0.05,
+            boundary_energy=0.0,
+            use_diagonal_trials=False,
+            stored_energy_context=stored_energy_context,
+        )
+
+        self.assertGreater(float(force[0]), 0.0)
+
+    def test_roi_weighted_label_density_prefers_same_label_support_before_fallback(self) -> None:
+        label_density_index = {
+            7: {
+                "positions": np.array([[0.55, 0.50], [0.75, 0.50]], dtype=np.float64),
+                "densities": np.array([1.0, 5.0], dtype=np.float64),
+                "mean_density": 3.0,
+            },
+        }
+
+        density = mesh_module._roi_weighted_label_density(
+            np.array([0.50, 0.50], dtype=np.float64),
+            7,
+            label_density_index,
+            roi=0.40,
+            dummy_density=50.0,
+            all_positions=np.array([[0.55, 0.50], [0.75, 0.50], [0.52, 0.52]], dtype=np.float64),
+            all_densities=np.array([1.0, 5.0, 20.0], dtype=np.float64),
+        )
+
+        self.assertGreater(density, 1.0)
+        self.assertLess(density, 5.0)
+        self.assertLess(density, 20.0)
+
+    def test_roi_weighted_label_density_uses_dummy_density_when_same_flynn_has_no_roi_support(self) -> None:
+        density = mesh_module._roi_weighted_label_density(
+            np.array([0.50, 0.50], dtype=np.float64),
+            7,
+            {
+                7: {
+                    "positions": np.array([[0.90, 0.90]], dtype=np.float64),
+                    "densities": np.array([3.0], dtype=np.float64),
+                    "mean_density": 3.0,
+                },
+            },
+            roi=0.10,
+            dummy_density=50.0,
+            all_positions=np.array([[0.52, 0.50]], dtype=np.float64),
+            all_densities=np.array([20.0], dtype=np.float64),
+        )
+
+        self.assertEqual(density, 50.0)
+
+    def test_roi_weighted_label_density_falls_back_to_all_unodes_when_target_flynn_has_none(self) -> None:
+        density = mesh_module._roi_weighted_label_density(
+            np.array([0.50, 0.50], dtype=np.float64),
+            7,
+            {
+                7: {
+                    "positions": np.zeros((0, 2), dtype=np.float64),
+                    "densities": np.zeros((0,), dtype=np.float64),
+                    "mean_density": 0.0,
+                },
+            },
+            roi=0.10,
+            dummy_density=50.0,
+            all_positions=np.array([[0.52, 0.50], [0.55, 0.50]], dtype=np.float64),
+            all_densities=np.array([20.0, 10.0], dtype=np.float64),
+        )
+
+        self.assertGreater(density, 10.0)
+        self.assertLess(density, 20.0)
+
+    def test_fallback_incident_stored_energy_uses_dummy_density_and_max_phase_energy(self) -> None:
+        phase_db = SimpleNamespace(
+            first_phase=1,
+            phase_properties={
+                1: SimpleNamespace(stored_energy=2.0),
+                2: SimpleNamespace(stored_energy=5.0),
+            },
+        )
+
+        energy = mesh_module._fallback_incident_stored_energy(
+            0.25,
+            [10, 20],
+            {10: 1, 20: 2},
+            phase_db,
+            dummy_density=8.0,
+        )
+
+        self.assertAlmostEqual(energy, 10.0, places=12)
+
+    def test_trial_cluster_area_energy_uses_target_cluster_area(self) -> None:
+        nodes = np.array(
+            [
+                [0.10, 0.10],
+                [0.30, 0.10],
+                [0.10, 0.30],
+            ],
+            dtype=np.float64,
+        )
+        flynns = [
+            {"flynn_id": 10, "source_flynn_id": 10, "label": 0, "node_ids": [0, 1, 2]},
+        ]
+        cluster_energy = mesh_module._trial_cluster_area_energy(
+            0,
+            np.array([0.15, 0.10], dtype=np.float64),
+            nodes,
+            flynns,
+            [10],
+            {
+                "by_flynn": {
+                    10: {
+                        "phase_id": 2,
+                        "current_area": 0.02,
+                        "target_area": 0.02,
+                    },
+                },
+                "multiplier_a": 2.0,
+                "multiplier_d": 2.0,
+            },
+        )
+
+        self.assertAlmostEqual(cluster_energy, 0.125, places=12)
+
+    def test_trial_swept_area_unions_same_side_triangles(self) -> None:
+        area = mesh_module._trial_swept_area(
+            np.array([0.50, 0.50], dtype=np.float64),
+            np.array([0.60, 0.50], dtype=np.float64),
+            np.array(
+                [
+                    [0.525, 0.60],
+                    [0.575, 0.60],
+                ],
+                dtype=np.float64,
+            ),
+        )
+
+        self.assertAlmostEqual(area, 0.0075, places=12)
+
+    def test_relax_mesh_state_elle_surface_runs_local_topology_after_each_moved_node(self) -> None:
+        mesh_state = {
+            "nodes": [
+                {"x": 0.50, "y": 0.50},
+                {"x": 0.20, "y": 0.45},
+                {"x": 0.78, "y": 0.57},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2]},
+            ],
+            "stats": {"grid_shape": [256, 256]},
+            "events": [],
+        }
+
+        with patch.object(
+            mesh_module,
+            "_move_node_elle_surface",
+            return_value=np.array([0.01, 0.0], dtype=np.float64),
+        ) as move_mock, patch.object(
+            mesh_module,
+            "_maintain_mesh_locally",
+            side_effect=lambda nodes, flynns, **kwargs: (
+                nodes,
+                flynns,
+                [],
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ) as local_maintain_mock, patch.object(
+            mesh_module,
+            "_maintain_mesh_once",
+            side_effect=lambda nodes, flynns, **kwargs: (
+                nodes,
+                flynns,
+                [],
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+        ) as maintain_mock:
+            relax_mesh_state(
+                mesh_state,
+                MeshRelaxationConfig(
+                    steps=1,
+                    topology_steps=1,
+                    movement_model="elle_surface",
+                    switch_distance=0.05,
+                ),
+            )
+
+        self.assertEqual(move_mock.call_count, 3)
+        self.assertEqual(local_maintain_mock.call_count, 3)
+        self.assertEqual(maintain_mock.call_count, 1)
 
     def test_couple_mesh_to_order_parameters_supports_mesh_only_translation(self) -> None:
         current_labels = np.array(
@@ -1727,6 +3988,613 @@ class SimulationTests(unittest.TestCase):
         np.testing.assert_array_equal(dominant_grain_map(phi_feedback), target_labels)
         self.assertEqual(mesh_state["stats"]["mesh_update_mode"], "mesh_only")
         self.assertGreater(feedback_stats["changed_pixels"], 0)
+
+    def test_couple_mesh_to_order_parameters_mesh_only_uses_full_seed_label_remap(self) -> None:
+        current_labels = np.zeros((4, 4), dtype=np.int32)
+        target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        phi = mesh_labels_to_order_parameters(current_labels, 2)
+        target_mesh_state = {
+            "nodes": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.5, "y": 0.0},
+                {"x": 0.5, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2, 3]},
+                {"flynn_id": 1, "label": 1, "node_ids": [1, 4, 5, 2]},
+            ],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_seed_unodes": {
+                "grid_shape": (4, 4),
+                "positions": (
+                    (0.125, 0.875),
+                    (0.125, 0.625),
+                    (0.125, 0.375),
+                    (0.125, 0.125),
+                    (0.375, 0.875),
+                    (0.375, 0.625),
+                    (0.375, 0.375),
+                    (0.375, 0.125),
+                    (0.625, 0.875),
+                    (0.625, 0.625),
+                    (0.625, 0.375),
+                    (0.625, 0.125),
+                    (0.875, 0.875),
+                    (0.875, 0.625),
+                    (0.875, 0.375),
+                    (0.875, 0.125),
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (100, 200),
+                "field_order": ("U_ATTRIB_C",),
+                "values": {
+                    "U_ATTRIB_C": tuple(0.0 for _ in range(16)),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": tuple((0.0,) for _ in range(16)),
+                },
+            },
+        }
+
+        phi_feedback, mesh_state, feedback_stats = couple_mesh_to_order_parameters(
+            phi,
+            MeshFeedbackConfig(
+                every=1,
+                strength=0.0,
+                transport_strength=0.0,
+                update_mode="mesh_only",
+                relax_config=MeshRelaxationConfig(steps=0, topology_steps=0),
+            ),
+            base_mesh_state=target_mesh_state,
+        )
+
+        np.testing.assert_array_equal(dominant_grain_map(phi_feedback), target_labels)
+        self.assertEqual(feedback_stats["assigned_unodes"], 16)
+        self.assertEqual(feedback_stats["unassigned_unodes"], 0)
+        self.assertEqual(feedback_stats["changed_unodes"], 8)
+        self.assertEqual(feedback_stats["label_remap_mode"], "full_seed_remap")
+        self.assertEqual(mesh_state["stats"]["mesh_label_remap_mode"], "full_seed_remap")
+        remapped = np.asarray(mesh_state["_runtime_seed_unode_fields"]["values"]["U_ATTRIB_C"], dtype=np.float64)
+        self.assertTrue(np.allclose(remapped[:8], 100.0))
+        self.assertTrue(np.allclose(remapped[8:], 200.0))
+
+    def test_couple_mesh_to_order_parameters_extends_source_labels_for_new_identity_stable_label(self) -> None:
+        current_labels = np.array(
+            [
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        target_labels = np.array(
+            [
+                [2, 2, 1, 1],
+                [2, 2, 1, 1],
+                [0, 0, 1, 1],
+                [0, 0, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        phi = mesh_labels_to_order_parameters(current_labels, 3)
+        target_mesh_state = {
+            "nodes": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.5, "y": 0.0},
+                {"x": 0.5, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 2, "node_ids": [0, 1, 2, 3]},
+                {"flynn_id": 1, "label": 1, "node_ids": [1, 4, 5, 2]},
+            ],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_seed_unodes": {
+                "grid_shape": (4, 4),
+                "positions": (
+                    (0.125, 0.875),
+                    (0.125, 0.625),
+                    (0.125, 0.375),
+                    (0.125, 0.125),
+                    (0.375, 0.875),
+                    (0.375, 0.625),
+                    (0.375, 0.375),
+                    (0.375, 0.125),
+                    (0.625, 0.875),
+                    (0.625, 0.625),
+                    (0.625, 0.375),
+                    (0.625, 0.125),
+                    (0.875, 0.875),
+                    (0.875, 0.625),
+                    (0.875, 0.375),
+                    (0.875, 0.125),
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (100, 200),
+                "field_order": ("U_ATTRIB_C",),
+                "values": {
+                    "U_ATTRIB_C": tuple(float(100 if value == 0 else 200) for value in current_labels.ravel()),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": tuple((float(100 if value == 0 else 200),) for value in current_labels.ravel()),
+                },
+            },
+        }
+
+        with patch.object(
+            mesh_module,
+            "assign_seed_unodes_from_mesh",
+            return_value=(
+                target_labels,
+                {
+                    "assigned_unodes": 16,
+                    "unassigned_unodes": 0,
+                    "changed_unodes": int(np.count_nonzero(target_labels != current_labels)),
+                },
+            ),
+        ):
+            phi_feedback, mesh_state, _feedback_stats = couple_mesh_to_order_parameters(
+                phi,
+                MeshFeedbackConfig(
+                    every=1,
+                    strength=0.0,
+                    transport_strength=0.0,
+                    update_mode="mesh_only",
+                    relax_config=MeshRelaxationConfig(steps=0, topology_steps=0),
+                ),
+                base_mesh_state=target_mesh_state,
+            )
+
+        np.testing.assert_array_equal(dominant_grain_map(phi_feedback), target_labels)
+        self.assertEqual(
+            tuple(mesh_state["_runtime_seed_unode_fields"]["source_labels"]),
+            (100, 200, 201),
+        )
+        remapped = np.asarray(mesh_state["_runtime_seed_unode_fields"]["values"]["U_ATTRIB_C"], dtype=np.float64)
+        self.assertIn(201.0, remapped.tolist())
+
+    def test_couple_mesh_to_order_parameters_uses_incremental_remap_after_nucleation_rebuild(self) -> None:
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        full_target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        incremental_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        phi = mesh_labels_to_order_parameters(current_labels, 2)
+        base_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_incremental_label_remap_stages": 1,
+        }
+        motion_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_seed_unodes": {
+                "grid_shape": (4, 4),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (100, 200),
+                "field_order": ("U_ATTRIB_C",),
+                "values": {
+                    "U_ATTRIB_C": tuple(
+                        float(100 if value == 0 else 200) for value in current_labels.ravel()
+                    ),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": tuple(
+                        (float(100 if value == 0 else 200),) for value in current_labels.ravel()
+                    ),
+                },
+            },
+        }
+
+        with (
+            patch(
+                "elle_jax_model.mesh.compute_mesh_motion_velocity",
+                return_value=(
+                    base_mesh_state,
+                    motion_mesh_state,
+                    None,
+                    None,
+                    {
+                        "transport_pixels": 0,
+                        "max_displacement": 0.0,
+                        "mean_displacement": 0.0,
+                    },
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.assign_seed_unodes_from_mesh",
+                return_value=(full_target_labels, {"assigned_unodes": 16, "unassigned_unodes": 0}),
+            ),
+            patch(
+                "elle_jax_model.mesh.incremental_seed_unode_reassignment",
+                return_value=(incremental_labels, {"swept_unodes": 4, "changed_unodes": 1}),
+            ) as incremental_mock,
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_fields",
+                return_value=(
+                    dict(motion_mesh_state["_runtime_seed_unode_fields"]["values"]),
+                    {
+                        "updated_scalar_unodes": 0,
+                        "scalar_swept_unodes": 0,
+                        "mass_conserved_fields": 0,
+                        "mass_partitioned_fields": 0,
+                        "scalar_mass_residual": 0.0,
+                    },
+                    {},
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_sections",
+                return_value=(
+                    motion_mesh_state["_runtime_seed_unode_sections"],
+                    {"updated_orientation_unodes": 0, "fallback_orientation_unodes": 0},
+                ),
+            ),
+        ):
+            phi_feedback, mesh_state, feedback_stats = couple_mesh_to_order_parameters(
+                phi,
+                MeshFeedbackConfig(
+                    every=1,
+                    strength=0.0,
+                    transport_strength=0.0,
+                    update_mode="mesh_only",
+                    relax_config=MeshRelaxationConfig(steps=0, topology_steps=0),
+                ),
+                base_mesh_state=base_mesh_state,
+            )
+
+        incremental_mock.assert_called_once()
+        np.testing.assert_array_equal(dominant_grain_map(phi_feedback), incremental_labels)
+        self.assertEqual(feedback_stats["label_remap_mode"], "incremental_post_nucleation_rebuild")
+        self.assertEqual(feedback_stats["incremental_swept_unodes"], 4)
+        self.assertEqual(feedback_stats["incremental_changed_unodes"], 1)
+        self.assertNotIn("_runtime_incremental_label_remap_stages", mesh_state)
+
+    def test_incremental_post_nucleation_remap_falls_back_to_full_remap_when_more_fragmented(self) -> None:
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            dtype=np.int32,
+        )
+        full_target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        incremental_labels = np.array(
+            [
+                [1, 0, 1, 0],
+                [0, 0, 0, 0],
+                [1, 0, 1, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        phi = mesh_labels_to_order_parameters(current_labels, 2)
+        base_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_incremental_label_remap_stages": 1,
+        }
+        motion_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_seed_unodes": {
+                "grid_shape": (4, 4),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (100, 200),
+                "field_order": ("U_ATTRIB_C",),
+                "values": {
+                    "U_ATTRIB_C": tuple(100.0 for _ in current_labels.ravel()),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": tuple((100.0,) for _ in current_labels.ravel()),
+                },
+            },
+        }
+
+        with (
+            patch(
+                "elle_jax_model.mesh.compute_mesh_motion_velocity",
+                return_value=(
+                    base_mesh_state,
+                    motion_mesh_state,
+                    None,
+                    None,
+                    {
+                        "transport_pixels": 0,
+                        "max_displacement": 0.0,
+                        "mean_displacement": 0.0,
+                    },
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.assign_seed_unodes_from_mesh",
+                return_value=(full_target_labels, {"assigned_unodes": 16, "unassigned_unodes": 0}),
+            ),
+            patch(
+                "elle_jax_model.mesh.incremental_seed_unode_reassignment",
+                return_value=(incremental_labels, {"swept_unodes": 8, "changed_unodes": 6}),
+            ) as incremental_mock,
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_fields",
+                return_value=(
+                    dict(motion_mesh_state["_runtime_seed_unode_fields"]["values"]),
+                    {
+                        "updated_scalar_unodes": 0,
+                        "scalar_swept_unodes": 0,
+                        "mass_conserved_fields": 0,
+                        "mass_partitioned_fields": 0,
+                        "scalar_mass_residual": 0.0,
+                    },
+                    {},
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_sections",
+                return_value=(
+                    motion_mesh_state["_runtime_seed_unode_sections"],
+                    {"updated_orientation_unodes": 0, "fallback_orientation_unodes": 0},
+                ),
+            ),
+        ):
+            phi_feedback, mesh_state, feedback_stats = couple_mesh_to_order_parameters(
+                phi,
+                MeshFeedbackConfig(
+                    every=1,
+                    strength=0.0,
+                    transport_strength=0.0,
+                    update_mode="mesh_only",
+                    relax_config=MeshRelaxationConfig(steps=0, topology_steps=0),
+                ),
+                base_mesh_state=base_mesh_state,
+            )
+
+        incremental_mock.assert_called_once()
+        np.testing.assert_array_equal(dominant_grain_map(phi_feedback), full_target_labels)
+        self.assertEqual(feedback_stats["label_remap_mode"], "full_seed_remap_post_nucleation_fallback")
+        self.assertEqual(feedback_stats["incremental_fragmentation_fallback"], 1)
+        self.assertGreater(
+            feedback_stats["incremental_component_count"],
+            feedback_stats["full_remap_component_count"],
+        )
+        self.assertNotIn("_runtime_incremental_label_remap_stages", mesh_state)
+
+    def test_incremental_post_nucleation_full_fallback_applies_connectivity_cleanup(self) -> None:
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            dtype=np.int32,
+        )
+        full_target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 1, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        cleaned_full_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        incremental_labels = np.array(
+            [
+                [0, 1, 0, 1],
+                [0, 0, 0, 0],
+                [0, 1, 0, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        phi = mesh_labels_to_order_parameters(current_labels, 2)
+        base_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+            "_runtime_incremental_label_remap_stages": 1,
+        }
+        motion_mesh_state = {
+            "nodes": [],
+            "flynns": [],
+            "stats": {"grid_shape": [4, 4], "nucleation_fragment_merge_max_size": 10},
+            "events": [],
+            "_runtime_seed_unodes": {
+                "grid_shape": (4, 4),
+                "positions": tuple(
+                    (0.125 + 0.25 * ix, 0.875 - 0.25 * iy)
+                    for ix in range(4)
+                    for iy in range(4)
+                ),
+                "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+            },
+            "_runtime_seed_unode_fields": {
+                "label_attribute": "U_ATTRIB_C",
+                "source_labels": (100, 200),
+                "field_order": ("U_ATTRIB_C",),
+                "values": {
+                    "U_ATTRIB_C": tuple(100.0 for _ in current_labels.ravel()),
+                },
+            },
+            "_runtime_seed_unode_sections": {
+                "field_order": ("U_ATTRIB_C",),
+                "defaults": {"U_ATTRIB_C": (0.0,)},
+                "component_counts": {"U_ATTRIB_C": 1},
+                "values": {
+                    "U_ATTRIB_C": tuple((100.0,) for _ in current_labels.ravel()),
+                },
+            },
+        }
+
+        with (
+            patch(
+                "elle_jax_model.mesh.compute_mesh_motion_velocity",
+                return_value=(
+                    base_mesh_state,
+                    motion_mesh_state,
+                    None,
+                    None,
+                    {
+                        "transport_pixels": 0,
+                        "max_displacement": 0.0,
+                        "mean_displacement": 0.0,
+                    },
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.assign_seed_unodes_from_mesh",
+                return_value=(full_target_labels, {"assigned_unodes": 16, "unassigned_unodes": 0}),
+            ),
+            patch(
+                "elle_jax_model.mesh.incremental_seed_unode_reassignment",
+                return_value=(incremental_labels, {"swept_unodes": 12, "changed_unodes": 8}),
+            ),
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_fields",
+                return_value=(
+                    dict(motion_mesh_state["_runtime_seed_unode_fields"]["values"]),
+                    {
+                        "updated_scalar_unodes": 0,
+                        "scalar_swept_unodes": 0,
+                        "mass_conserved_fields": 0,
+                        "mass_partitioned_fields": 0,
+                        "scalar_mass_residual": 0.0,
+                    },
+                    {},
+                ),
+            ),
+            patch(
+                "elle_jax_model.mesh.update_seed_unode_sections",
+                return_value=(
+                    motion_mesh_state["_runtime_seed_unode_sections"],
+                    {"updated_orientation_unodes": 0, "fallback_orientation_unodes": 0},
+                ),
+            ),
+        ):
+            phi_feedback, _mesh_state, feedback_stats = couple_mesh_to_order_parameters(
+                phi,
+                MeshFeedbackConfig(
+                    every=1,
+                    strength=0.0,
+                    transport_strength=0.0,
+                    update_mode="mesh_only",
+                    relax_config=MeshRelaxationConfig(steps=0, topology_steps=0),
+                ),
+                base_mesh_state=base_mesh_state,
+            )
+
+        np.testing.assert_array_equal(dominant_grain_map(phi_feedback), cleaned_full_labels)
+        self.assertEqual(feedback_stats["label_remap_mode"], "full_seed_remap_post_nucleation_fallback")
+        self.assertEqual(feedback_stats["incremental_fragmentation_fallback"], 1)
+        self.assertGreater(feedback_stats["connectivity_reassigned_unodes"], 0)
+        self.assertGreater(feedback_stats["connectivity_merged_components"], 0)
 
     def test_assign_seed_unodes_from_mesh_respects_original_unode_positions(self) -> None:
         mesh_state = {
@@ -1784,6 +4652,82 @@ class SimulationTests(unittest.TestCase):
         )
         self.assertEqual(stats["assigned_unodes"], 16)
         self.assertEqual(stats["unassigned_unodes"], 0)
+
+    def test_assign_seed_unodes_from_mesh_fills_polygon_gaps_from_rasterized_mesh(self) -> None:
+        mesh_state = {
+            "nodes": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.5, "y": 0.0},
+                {"x": 0.5, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2, 3]},
+                {"flynn_id": 1, "label": 1, "node_ids": [1, 4, 5, 2]},
+            ],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+        }
+        seed_unodes = {
+            "grid_shape": (4, 4),
+            "positions": (
+                (0.125, 0.875),
+                (0.125, 0.625),
+                (0.125, 0.375),
+                (0.125, 0.125),
+                (0.375, 0.875),
+                (0.375, 0.625),
+                (0.375, 0.375),
+                (0.375, 0.125),
+                (0.625, 0.875),
+                (0.625, 0.625),
+                (0.625, 0.375),
+                (0.625, 0.125),
+                (0.875, 0.875),
+                (0.875, 0.625),
+                (0.875, 0.375),
+                (0.875, 0.125),
+            ),
+            "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+        }
+        fallback_labels = np.full((4, 4), 9, dtype=np.int32)
+        rasterized_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+
+        original_mark = mesh_module._mark_seed_points_in_polygon
+        state = {"call_index": 0}
+
+        def sparse_mark(points, polygon_points, active_mask=None):
+            result = original_mark(points, polygon_points, active_mask=active_mask)
+            assigned_indices = np.flatnonzero(result)
+            if state["call_index"] == 0 and assigned_indices.size:
+                result[assigned_indices[-1]] = False
+            state["call_index"] += 1
+            return result
+
+        with (
+            patch("elle_jax_model.mesh._mark_seed_points_in_polygon", side_effect=sparse_mark),
+            patch("elle_jax_model.mesh.rasterize_mesh_labels", return_value=rasterized_labels),
+        ):
+            labels, stats = assign_seed_unodes_from_mesh(
+                mesh_state,
+                seed_unodes,
+                fallback_labels=fallback_labels,
+            )
+
+        np.testing.assert_array_equal(labels, rasterized_labels)
+        self.assertEqual(stats["assigned_unodes"], 16)
+        self.assertEqual(stats["unassigned_unodes"], 0)
+        self.assertGreater(stats["raster_filled_unassigned"], 0)
 
     def test_incremental_seed_unode_reassignment_updates_only_swept_region(self) -> None:
         base_mesh_state = {
@@ -2046,6 +4990,219 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(stats["mass_partitioned_fields"], 1)
         self.assertAlmostEqual(stats["scalar_mass_residual"], 0.0, places=8)
         self.assertAlmostEqual(before_mass, after_mass, places=8)
+
+    def test_update_seed_unode_fields_resets_swept_u_dislocden(self) -> None:
+        base_mesh_state = {
+            "nodes": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.5, "y": 0.0},
+                {"x": 0.5, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2, 3]},
+                {"flynn_id": 1, "label": 1, "node_ids": [1, 4, 5, 2]},
+            ],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+        }
+        moved_mesh_state = {
+            "nodes": [
+                {"x": 0.0, "y": 0.0},
+                {"x": 0.75, "y": 0.0},
+                {"x": 0.75, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 1.0, "y": 0.0},
+                {"x": 1.0, "y": 1.0},
+            ],
+            "flynns": [
+                {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2, 3]},
+                {"flynn_id": 1, "label": 1, "node_ids": [1, 4, 5, 2]},
+            ],
+            "stats": {"grid_shape": [4, 4]},
+            "events": [],
+        }
+        seed_unodes = {
+            "grid_shape": (4, 4),
+            "positions": (
+                (0.125, 0.875),(0.125, 0.625),(0.125, 0.375),(0.125, 0.125),
+                (0.375, 0.875),(0.375, 0.625),(0.375, 0.375),(0.375, 0.125),
+                (0.625, 0.875),(0.625, 0.625),(0.625, 0.375),(0.625, 0.125),
+                (0.875, 0.875),(0.875, 0.625),(0.875, 0.375),(0.875, 0.125),
+            ),
+            "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+        }
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        disloc_values = (
+            1.0, 2.0, 3.0, 4.0,
+            5.0, 6.0, 7.0, 8.0,
+            9.0, 10.0, 11.0, 12.0,
+            13.0, 14.0, 15.0, 16.0,
+        )
+        seed_fields = {
+            "label_attribute": "U_ATTRIB_C",
+            "source_labels": (100, 200),
+            "roi": 0.7,
+            "values": {
+                "U_ATTRIB_C": (100.0,) * 8 + (200.0,) * 8,
+                "U_DISLOCDEN": disloc_values,
+            },
+        }
+
+        updated_fields, stats, _mass_ledgers = update_seed_unode_fields(
+            current_labels,
+            target_labels,
+            base_mesh_state,
+            moved_mesh_state,
+            seed_unodes,
+            seed_fields,
+        )
+
+        updated_disloc = np.asarray(updated_fields["U_DISLOCDEN"], dtype=np.float64).reshape(4, 4)
+        before_disloc = np.asarray(disloc_values, dtype=np.float64).reshape(4, 4)
+
+        np.testing.assert_allclose(updated_disloc[2, :], 0.0)
+        np.testing.assert_allclose(updated_disloc[[0, 1, 3], :], before_disloc[[0, 1, 3], :])
+        self.assertEqual(stats["scalar_swept_unodes"], 4)
+        self.assertGreaterEqual(stats["updated_scalar_unodes"], 4)
+
+    def test_update_seed_unode_sections_uses_nearest_same_label_donor_for_u_euler_3(self) -> None:
+        seed_unodes = {
+            "grid_shape": (4, 4),
+            "positions": (
+                (0.125, 0.875),(0.125, 0.625),(0.125, 0.375),(0.125, 0.125),
+                (0.375, 0.875),(0.375, 0.625),(0.375, 0.375),(0.375, 0.125),
+                (0.625, 0.875),(0.625, 0.625),(0.625, 0.375),(0.625, 0.125),
+                (0.875, 0.875),(0.875, 0.625),(0.875, 0.375),(0.875, 0.125),
+            ),
+            "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+        }
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        target_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        euler_values = (
+            (10.0, 100.0, 1000.0), (11.0, 101.0, 1001.0), (12.0, 102.0, 1002.0), (13.0, 103.0, 1003.0),
+            (20.0, 200.0, 2000.0), (21.0, 201.0, 2001.0), (22.0, 202.0, 2002.0), (23.0, 203.0, 2003.0),
+            (30.0, 300.0, 3000.0), (31.0, 301.0, 3001.0), (32.0, 302.0, 3002.0), (33.0, 303.0, 3003.0),
+            (40.0, 400.0, 4000.0), (41.0, 401.0, 4001.0), (42.0, 402.0, 4002.0), (43.0, 403.0, 4003.0),
+        )
+        seed_sections = {
+            "field_order": ("U_EULER_3",),
+            "id_order": tuple(range(16)),
+            "defaults": {"U_EULER_3": (0.0, 0.0, 0.0)},
+            "component_counts": {"U_EULER_3": 3},
+            "values": {"U_EULER_3": euler_values},
+        }
+
+        updated_sections, stats = update_seed_unode_sections(
+            current_labels,
+            target_labels,
+            seed_unodes,
+            seed_sections,
+        )
+
+        updated = np.asarray(updated_sections["values"]["U_EULER_3"], dtype=np.float64).reshape(4, 4, 3)
+        original = np.asarray(euler_values, dtype=np.float64).reshape(4, 4, 3)
+
+        np.testing.assert_allclose(updated[2, :, :], original[1, :, :])
+        np.testing.assert_allclose(updated[[0, 1, 3], :, :], original[[0, 1, 3], :, :])
+        self.assertEqual(stats["updated_orientation_unodes"], 4)
+        self.assertEqual(stats["fallback_orientation_unodes"], 0)
+
+    def test_update_seed_unode_sections_uses_flynn_mean_fallback_when_no_safe_donor_exists(self) -> None:
+        seed_unodes = {
+            "grid_shape": (4, 4),
+            "positions": (
+                (0.125, 0.875),(0.125, 0.625),(0.125, 0.375),(0.125, 0.125),
+                (0.375, 0.875),(0.375, 0.625),(0.375, 0.375),(0.375, 0.125),
+                (0.625, 0.875),(0.625, 0.625),(0.625, 0.375),(0.625, 0.125),
+                (0.875, 0.875),(0.875, 0.625),(0.875, 0.375),(0.875, 0.125),
+            ),
+            "grid_indices": tuple((ix, iy) for ix in range(4) for iy in range(4)),
+        }
+        current_labels = np.array(
+            [
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
+        target_labels = np.array(
+            [
+                [1, 1, 1, 1],
+                [1, 1, 1, 1],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            dtype=np.int32,
+        )
+        euler_values = tuple(
+            (float(index), float(index + 100.0), float(index + 1000.0))
+            for index in range(16)
+        )
+        seed_sections = {
+            "field_order": ("U_EULER_3",),
+            "id_order": tuple(range(16)),
+            "defaults": {"U_EULER_3": (0.0, 0.0, 0.0)},
+            "component_counts": {"U_EULER_3": 3},
+            "values": {"U_EULER_3": euler_values},
+        }
+
+        updated_sections, stats = update_seed_unode_sections(
+            current_labels,
+            target_labels,
+            seed_unodes,
+            seed_sections,
+        )
+
+        original = np.asarray(euler_values, dtype=np.float64)
+        updated = np.asarray(updated_sections["values"]["U_EULER_3"], dtype=np.float64)
+        sample_grid_indices = np.asarray(seed_unodes["grid_indices"], dtype=np.int32)
+        sample_target = np.asarray(target_labels, dtype=np.int32)[
+            sample_grid_indices[:, 0], sample_grid_indices[:, 1]
+        ]
+        point_index = 0
+        expected = np.mean(original[(sample_target == 1) & (np.arange(sample_target.size) != point_index)], axis=0)
+
+        np.testing.assert_allclose(updated[point_index], expected)
+        self.assertEqual(stats["fallback_orientation_unodes"], 16)
+        self.assertEqual(stats["updated_orientation_unodes"], 16)
 
     def test_update_seed_unode_fields_shares_mass_partition_with_node_fields(self) -> None:
         base_mesh_state = {
@@ -2831,6 +5988,111 @@ class SimulationTests(unittest.TestCase):
         self.assertGreater(relaxed["stats"]["mesh_deleted_small_flynns"], 0)
         self.assertTrue(any(event["type"] == "delete_small_flynn" for event in relaxed["events"]))
 
+    def test_delete_single_nodes_local_removes_single_node(self) -> None:
+        nodes = np.array(
+            [
+                [0.10, 0.10],
+                [0.20, 0.10],
+                [0.25, 0.20],
+                [0.15, 0.25],
+            ],
+            dtype=np.float64,
+        )
+        flynns = [
+            {"flynn_id": 1, "label": 1, "node_ids": [0, 1, 2, 3, 1]},
+        ]
+
+        updated_nodes, updated_flynns, events, deleted = mesh_module._delete_single_nodes_local(
+            nodes,
+            flynns,
+            focus_nodes={0},
+        )
+
+        self.assertEqual(deleted, 1)
+        self.assertEqual(len(updated_nodes), 3)
+        self.assertEqual(len(updated_flynns), 1)
+        self.assertEqual(updated_flynns[0]["node_ids"], [0, 1, 2])
+        self.assertEqual(events[0]["type"], "delete_single")
+
+    def test_check_double_node_local_deletes_short_gap_node(self) -> None:
+        nodes = np.array(
+            [
+                [0.00, 0.00],
+                [0.01, 0.00],
+                [0.50, 0.00],
+                [0.50, 0.50],
+            ],
+            dtype=np.float64,
+        )
+        flynns = [
+            {"flynn_id": 0, "label": 0, "node_ids": [0, 1, 2, 3]},
+        ]
+
+        updated_nodes, updated_flynns, events, inserted, removed = mesh_module._check_double_node_local(
+            nodes,
+            flynns,
+            node_id=1,
+            switch_distance=0.1,
+            min_node_separation=0.1,
+            max_node_separation=100.0,
+        )
+
+        self.assertEqual(inserted, 0)
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(updated_nodes), 3)
+        self.assertEqual(updated_flynns[0]["node_ids"], [0, 1, 2])
+        self.assertEqual(events[0]["type"], "delete_double")
+        self.assertEqual(events[0]["reason"], "gap_too_small")
+
+    def test_check_triple_node_local_respects_phase_boundary_switch_gate(self) -> None:
+        nodes = np.array(
+            [
+                [0.50, 0.50],
+                [0.52, 0.50],
+                [0.46, 0.58],
+                [0.46, 0.42],
+                [0.58, 0.58],
+                [0.58, 0.42],
+            ],
+            dtype=np.float64,
+        )
+        flynns = [
+            {"flynn_id": 0, "label": 0, "node_ids": [2, 0, 1, 4]},
+            {"flynn_id": 1, "label": 1, "node_ids": [2, 0, 3]},
+            {"flynn_id": 2, "label": 2, "node_ids": [3, 0, 1, 5]},
+            {"flynn_id": 3, "label": 3, "node_ids": [4, 1, 5]},
+        ]
+
+        blocked_nodes, blocked_flynns, blocked_events, _, _, blocked_switched, blocked_rejected = mesh_module._check_triple_node_local(
+            nodes.copy(),
+            copy.deepcopy(flynns),
+            node_id=0,
+            switch_distance=0.05,
+            min_node_separation=0.01,
+            max_node_separation=100.0,
+            phase_lookup={0: 1, 1: 1, 2: 2, 3: 2},
+        )
+
+        self.assertEqual(blocked_switched, 0)
+        self.assertGreaterEqual(blocked_rejected, 1)
+        self.assertEqual(blocked_events, [])
+        self.assertEqual(blocked_flynns[0]["node_ids"], [2, 0, 1, 4])
+
+        switched_nodes, switched_flynns, switched_events, _, _, switched_count, switched_rejected = mesh_module._check_triple_node_local(
+            nodes.copy(),
+            copy.deepcopy(flynns),
+            node_id=0,
+            switch_distance=0.05,
+            min_node_separation=0.01,
+            max_node_separation=100.0,
+            phase_lookup={0: 1, 1: 1, 2: 1, 3: 1},
+        )
+
+        self.assertEqual(switched_rejected, 0)
+        self.assertEqual(switched_count, 1)
+        self.assertEqual(switched_events[0]["reason"], "check_triple_switch_gap")
+        self.assertNotEqual(switched_flynns[0]["node_ids"], [2, 0, 1, 4])
+
     def test_relax_mesh_state_widens_acute_angle_in_topocheck_sequence(self) -> None:
         mesh_state = {
             "nodes": [
@@ -3436,6 +6698,239 @@ class SimulationTests(unittest.TestCase):
 
         self.assertGreater(maintained["stats"]["mesh_removed_nodes"], 0)
         self.assertLess(len(maintained["nodes"]), len(mesh_state["nodes"]))
+
+    def test_extract_legacy_reference_snapshot_reads_fft_example(self) -> None:
+        example = (
+            PROJECT_ROOT.parent
+            / "processes"
+            / "fft"
+            / "example"
+            / "step0"
+            / "inifft001.elle"
+        )
+
+        snapshot = extract_legacy_reference_snapshot(example)
+
+        self.assertEqual(snapshot["checkpoint_name"], "inifft001")
+        self.assertEqual(snapshot["mesh"]["num_flynns"], 16)
+        self.assertEqual(snapshot["mesh"]["num_nodes"], 1136)
+        self.assertEqual(snapshot["label_summary"]["attribute"], "U_ATTRIB_A")
+        self.assertEqual(snapshot["label_summary"]["grain_count"], 16)
+        self.assertEqual(snapshot["label_summary"]["grid_shape"], [256, 256])
+        self.assertIn("U_EULER_3", snapshot["field_summaries"])
+        self.assertIn("U_DISLOCDEN", snapshot["field_summaries"])
+        self.assertEqual(snapshot["skipped_sections"], [])
+
+    def test_legacy_reference_fixture_matches_fft_example_snapshot(self) -> None:
+        fixture = (
+            PROJECT_ROOT
+            / "legacy_reference"
+            / "testdata"
+            / "fft_example_step0_reference.json"
+        )
+        example = (
+            PROJECT_ROOT.parent
+            / "processes"
+            / "fft"
+            / "example"
+            / "step0"
+            / "inifft001.elle"
+        )
+
+        bundle = load_legacy_reference_bundle(fixture)
+        rebuilt = build_legacy_reference_bundle({"step0": example}, source_name="fft_example_step0")
+
+        self.assertEqual(bundle["source_name"], "fft_example_step0")
+        self.assertEqual(bundle["checkpoint_order"], ["step0"])
+        self.assertEqual(bundle["checkpoints"]["step0"]["mesh"], rebuilt["checkpoints"]["step0"]["mesh"])
+        self.assertEqual(
+            bundle["checkpoints"]["step0"]["label_summary"],
+            rebuilt["checkpoints"]["step0"]["label_summary"],
+        )
+        self.assertEqual(
+            bundle["checkpoints"]["step0"]["field_summaries"],
+            rebuilt["checkpoints"]["step0"]["field_summaries"],
+        )
+
+    def test_compare_legacy_reference_snapshot_matches_fft_example_fixture(self) -> None:
+        fixture = (
+            PROJECT_ROOT
+            / "legacy_reference"
+            / "testdata"
+            / "fft_example_step0_reference.json"
+        )
+        example = (
+            PROJECT_ROOT.parent
+            / "processes"
+            / "fft"
+            / "example"
+            / "step0"
+            / "inifft001.elle"
+        )
+        bundle = load_legacy_reference_bundle(fixture)
+
+        report = compare_legacy_reference_snapshot(example, bundle["checkpoints"]["step0"])
+
+        self.assertTrue(report["matches"])
+        self.assertEqual(report["mismatched_field_summaries"], [])
+        self.assertEqual(report["missing_field_summaries"], [])
+        self.assertEqual(report["unexpected_field_summaries"], [])
+        self.assertTrue(all(entry["matches"] for entry in report["mesh"].values()))
+        self.assertTrue(all(entry["matches"] for entry in report["label_summary"].values()))
+
+    def test_compare_legacy_reference_snapshot_detects_changed_field(self) -> None:
+        fixture = (
+            PROJECT_ROOT
+            / "legacy_reference"
+            / "testdata"
+            / "fft_example_step0_reference.json"
+        )
+        example = (
+            PROJECT_ROOT.parent
+            / "processes"
+            / "fft"
+            / "example"
+            / "step0"
+            / "inifft001.elle"
+        )
+        bundle = load_legacy_reference_bundle(fixture)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            candidate = Path(tmpdir) / "changed.elle"
+            text = example.read_text(encoding="utf-8")
+            section_start = text.index("\nU_ATTRIB_A\n")
+            prefix = text[:section_start]
+            suffix = text[section_start:]
+            suffix = suffix.replace(
+                "\n1 9.00000000e+00\n",
+                "\n1 9.90000000e+01\n",
+                1,
+            )
+            candidate.write_text(prefix + suffix, encoding="utf-8")
+
+            report = compare_legacy_reference_snapshot(candidate, bundle["checkpoints"]["step0"])
+
+        self.assertFalse(report["matches"])
+        self.assertIn("U_ATTRIB_A", report["mismatched_field_summaries"])
+        self.assertFalse(report["field_summaries"]["U_ATTRIB_A"]["value_hash"]["matches"])
+
+    def test_compare_legacy_reference_bundle_matches_fft_example_fixture(self) -> None:
+        fixture = (
+            PROJECT_ROOT
+            / "legacy_reference"
+            / "testdata"
+            / "fft_example_step0_reference.json"
+        )
+        example = (
+            PROJECT_ROOT.parent
+            / "processes"
+            / "fft"
+            / "example"
+            / "step0"
+            / "inifft001.elle"
+        )
+        bundle = load_legacy_reference_bundle(fixture)
+
+        report = compare_legacy_reference_bundle(bundle, {"step0": example})
+
+        self.assertTrue(report["matches"])
+        self.assertEqual(report["missing_checkpoints"], [])
+        self.assertEqual(report["unexpected_checkpoints"], [])
+        self.assertTrue(report["checkpoints"]["step0"]["matches"])
+
+    def test_extract_legacy_reference_transition_tracks_label_and_field_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            before = _write_elle_mesh_seed_example(Path(tmpdir) / "before.elle")
+            after = Path(tmpdir) / "after.elle"
+            text = before.read_text(encoding="utf-8")
+            text = text.replace("\n2 2.0\n", "\n2 9.0\n", 1)
+            text = text.replace("\n2 100\n", "\n2 200\n", 1)
+            after.write_text(text, encoding="utf-8")
+
+            transition = extract_legacy_reference_transition(before, after, checkpoint_name="seed_step")
+
+        self.assertEqual(transition["checkpoint_name"], "seed_step")
+        self.assertIn("U_ATTRIB_A", transition["field_transitions"])
+        self.assertIn("U_ATTRIB_C", transition["field_transitions"])
+        self.assertTrue(transition["label_transition"]["available"])
+        self.assertEqual(transition["label_transition"]["changed_pixels"], 1)
+        self.assertEqual(transition["field_transitions"]["U_ATTRIB_A"]["changed_rows"], 1)
+        self.assertEqual(transition["field_transitions"]["U_ATTRIB_C"]["changed_rows"], 1)
+
+    def test_compare_legacy_reference_transition_matches_identical_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            before = _write_elle_mesh_seed_example(Path(tmpdir) / "before.elle")
+            after = Path(tmpdir) / "after.elle"
+            text = before.read_text(encoding="utf-8")
+            text = text.replace("\n3 3.0\n", "\n3 7.0\n", 1)
+            after.write_text(text, encoding="utf-8")
+
+            reference = extract_legacy_reference_transition(before, after, checkpoint_name="field_only")
+            report = compare_legacy_reference_transition(before, after, reference)
+
+        self.assertTrue(report["matches"])
+        self.assertEqual(report["mismatched_field_transitions"], [])
+        self.assertEqual(report["missing_field_transitions"], [])
+        self.assertEqual(report["unexpected_field_transitions"], [])
+
+    def test_compare_legacy_reference_transition_detects_changed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            before = _write_elle_mesh_seed_example(Path(tmpdir) / "before.elle")
+            reference_after = Path(tmpdir) / "reference_after.elle"
+            candidate_after = Path(tmpdir) / "candidate_after.elle"
+
+            base_text = before.read_text(encoding="utf-8")
+            reference_after.write_text(
+                base_text.replace("\n4 4.0\n", "\n4 8.0\n", 1),
+                encoding="utf-8",
+            )
+            candidate_after.write_text(
+                base_text.replace("\n4 4.0\n", "\n4 12.0\n", 1),
+                encoding="utf-8",
+            )
+
+            reference = extract_legacy_reference_transition(
+                before,
+                reference_after,
+                checkpoint_name="mismatch_case",
+            )
+            report = compare_legacy_reference_transition(before, candidate_after, reference)
+
+        self.assertFalse(report["matches"])
+        self.assertIn("U_ATTRIB_A", report["mismatched_field_transitions"])
+        self.assertFalse(report["field_transitions"]["U_ATTRIB_A"]["delta_hash"]["matches"])
+
+    def test_fine_foam_outerstep_transition_fixture_matches_reference_pair(self) -> None:
+        fixture = (
+            PROJECT_ROOT
+            / "legacy_reference"
+            / "testdata"
+            / "fine_foam_outerstep_001_to_002_transition.json"
+        )
+        before = (
+            PROJECT_ROOT.parent.parent.parent
+            / "TwoWayIceModel_Release"
+            / "elle"
+            / "example"
+            / "results"
+            / "fine_foam_step001.elle"
+        )
+        after = (
+            PROJECT_ROOT.parent.parent.parent
+            / "TwoWayIceModel_Release"
+            / "elle"
+            / "example"
+            / "results"
+            / "fine_foam_step002.elle"
+        )
+
+        reference_transition = json.loads(fixture.read_text(encoding="utf-8"))
+        report = compare_legacy_reference_transition(before, after, reference_transition)
+
+        self.assertTrue(report["matches"])
+        self.assertEqual(report["mismatched_field_transitions"], [])
+        self.assertEqual(report["missing_field_transitions"], [])
+        self.assertEqual(report["unexpected_field_transitions"], [])
 
     def test_snapshot_statistics_tracks_active_grains(self) -> None:
         cfg = GrainGrowthConfig(nx=14, ny=10, num_grains=4, seed=11, init_mode="voronoi")

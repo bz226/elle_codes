@@ -88,7 +88,21 @@ python python_jax_model/run_gbm_faithful.py --init-elle /path/to/fine_foam_step0
 
 The faithful GBM branch now also has a dedicated module boundary in [gbm_faithful.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/gbm_faithful.py), so the original-ELLE-style NumPy path can evolve separately from the older mixed simulation runner. [run_truthful_numpy.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_truthful_numpy.py) remains as a compatibility alias to the new dedicated runner.
 
-That dedicated runner now exposes more honest GBM-stage controls such as `--motion-passes`, `--topology-passes`, `--stage-interval`, and `--raster-boundary-band` instead of foregrounding analogue-era phase-field coefficients. The older hidden flags still work for compatibility, but they are intentionally de-emphasized because the faithful `mesh_only` branch is driven mainly by ELLE seed geometry, node motion, topology repair, and unode reassignment rather than by PDE coefficients.
+That dedicated runner now exposes faithful GBM-stage controls such as `--motion-passes`, `--topology-passes`, `--stage-interval`, `--subloops-per-snapshot`, `--nucleation-steps-per-subloop`, `--gbm-steps-per-subloop`, `--recovery-steps-per-subloop`, `--raster-boundary-band`, and the original-code mobility inputs `--temperature-c` and `--phase-db`. The subloop controls let one saved faithful snapshot represent multiple original-style inner stages before output is written, which is important when comparing against workflows like the shipped `fine_foam` launch script where one saved `stepXXX` file is heavier than a single GBM stage. A first faithful recovery slice is now also available: it applies local Euler-angle trial rotations, updates `U_ATTRIB_F` as average local misorientation, and reduces `U_DISLOCDEN` proportionally to accepted local recovery. A first faithful nucleation slice is now also wired in: it detects large secondary subgrain clusters from `U_EULER_3` and can promote them into new labels before the next GBM stage, using a conservative override layer so these new labels are not immediately erased by the following mesh-only remap. The same runner can also replay frozen legacy mechanics snapshots before each saved outer step through `--mechanics-snapshot-dir`, and `--mechanics-only` disables nucleation, GBM, and recovery subloops so you can build a mechanics-only parity case without forcing an artificial mesh-evolution stage. The faithful CLI still does not advertise hidden PDE knobs, because the `mesh_only` branch is driven by ELLE seed geometry, node motion, topology repair, Arrhenius-scaled phase-pair mobility, unode reassignment, and now explicit mechanics, nucleation, and recovery stages rather than by phase-field coefficients.
+
+To run that mechanics-only parity path against a legacy before/after ELLE pair:
+
+```bash
+python python_jax_model/validate_faithful_mechanics_transition.py --init-elle /path/to/before.elle --mechanics-snapshot-dir /path/to/fft_snapshot_sequence --reference-before /path/to/before.elle --reference-after /path/to/after.elle --outdir python_jax_model/validation/faithful_mechanics_transition --json-out python_jax_model/validation/faithful_mechanics_transition/report.json
+```
+
+If you want the faithful guide to run as an ordered checkpoint workflow with resumable verification instead of stopping after every milestone, use:
+
+```bash
+python python_jax_model/run_faithful_workflow.py
+```
+
+That runner follows the guide order, records checkpoint state under `python_jax_model/validation/workflow/`, and reuses the existing targeted test and validation scripts for the automated steps. The checkpoint flow is documented in [docs/faithful_workflow.md](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/docs/faithful_workflow.md).
 
 To run the more faithful direct port of ELLE's original `phasefield` process:
 
@@ -125,6 +139,14 @@ To run a first benchmark-oriented validation pass against the local `fine_foam` 
 ```bash
 python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --pattern 'fine_foam_step*.elle' --data-dir /path/to/TwoWayIceModel_Release/data --json-out python_jax_model/validation/benchmark_validation_report.json
 ```
+
+To build a Figure-2-style grain-area validation line, comparing the mean grain area over time with one-standard-deviation bands and exporting the underlying grain-area KDE data:
+
+```bash
+python python_jax_model/validate_figure2_line.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --candidate-dir /path/to/your_candidate_sequence --pattern 'fine_foam_step*.elle' --json-out python_jax_model/validation/figure2_line_validation.json --html-out python_jax_model/validation/figure2_line_validation.html
+```
+
+This follows the spirit of Liu & Suckale Figure 2(c): it writes a standalone HTML line chart for the matched ELLE snapshots and also stores per-step grain-area distributions and KDE curves in the JSON report, so the distribution-side validation can be extended later without rerunning the sequence scan.
 
 This benchmark report checks whether the ELLE reference sequence shows the expected coarsening trend and whether the warm/high-strain release datasets evolve more strongly than the cold/low-strain release datasets, which is one of the clearest paper-level expectations we can verify locally right now.
 

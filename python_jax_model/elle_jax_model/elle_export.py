@@ -38,6 +38,216 @@ def _write_options(handle, nx: int, ny: int) -> None:
     handle.write("Pressure 1.00000000e+00\n")
 
 
+def _format_sparse_record(values: tuple[float, ...]) -> str:
+    if len(values) == 1:
+        return f"{float(values[0]):.8e}"
+    return " ".join(f"{float(value):.8e}" for value in values)
+
+
+def _iter_nondefault_records(
+    ordered_ids: list[int] | tuple[int, ...],
+    dense_values: list[tuple[float, ...]] | tuple[tuple[float, ...], ...],
+    default_value: tuple[float, ...],
+) -> list[tuple[int, tuple[float, ...]]]:
+    records: list[tuple[int, tuple[float, ...]]] = []
+    default_np = np.asarray(default_value, dtype=np.float64)
+    for entity_id, values in zip(ordered_ids, dense_values):
+        value_tuple = tuple(float(value) for value in values)
+        if np.allclose(np.asarray(value_tuple, dtype=np.float64), default_np, atol=1.0e-12, rtol=0.0):
+            continue
+        records.append((int(entity_id), value_tuple))
+    return records
+
+
+def _write_sparse_numeric_section(
+    handle,
+    section_name: str,
+    ordered_ids: list[int] | tuple[int, ...],
+    dense_values: list[tuple[float, ...]] | tuple[tuple[float, ...], ...],
+    default_value: tuple[float, ...],
+) -> None:
+    handle.write(f"{section_name}\n")
+    handle.write(f"Default {_format_sparse_record(default_value)}\n")
+    for entity_id, values in _iter_nondefault_records(ordered_ids, dense_values, default_value):
+        handle.write(f"{int(entity_id)} {_format_sparse_record(values)}\n")
+
+
+def _dense_unode_layout(nx: int, ny: int) -> tuple[tuple[int, ...], tuple[tuple[float, float], ...], tuple[tuple[int, int], ...]]:
+    unode_ids: list[int] = []
+    unode_positions: list[tuple[float, float]] = []
+    unode_grid_indices: list[tuple[int, int]] = []
+    unode_id = 0
+    for iy in range(ny):
+        y_coord = (iy + 0.5) / float(ny)
+        for ix in range(nx):
+            x_coord = (ix + 0.5) / float(nx)
+            unode_ids.append(int(unode_id))
+            unode_positions.append((float(x_coord), float(y_coord)))
+            unode_grid_indices.append((int(ix), int(iy)))
+            unode_id += 1
+    return tuple(unode_ids), tuple(unode_positions), tuple(unode_grid_indices)
+
+
+def _nearest_fill_dense_grid(values: np.ndarray, filled: np.ndarray) -> np.ndarray:
+    if not np.any(filled) or np.all(filled):
+        return values
+    dense = np.asarray(values).copy()
+    occupied = np.argwhere(filled)
+    missing = np.argwhere(~filled)
+    for ix, iy in missing:
+        deltas = occupied - np.asarray([ix, iy], dtype=np.int32)
+        nearest = occupied[int(np.argmin(np.einsum("ij,ij->i", deltas, deltas)))]
+        dense[ix, iy] = dense[int(nearest[0]), int(nearest[1])]
+    return dense
+
+
+def _densify_scalar_samples(
+    grid_shape: tuple[int, int],
+    grid_indices: np.ndarray,
+    sample_values: np.ndarray,
+    *,
+    categorical: bool,
+) -> np.ndarray:
+    nx, ny = grid_shape
+    filled = np.zeros((nx, ny), dtype=bool)
+    if categorical:
+        dense = np.zeros((nx, ny), dtype=np.float64)
+        buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for (ix, iy), value in zip(grid_indices, sample_values):
+            buckets[(int(ix), int(iy))].append(int(round(float(value))))
+        for (ix, iy), values in buckets.items():
+            labels, counts = np.unique(np.asarray(values, dtype=np.int32), return_counts=True)
+            dense[int(ix), int(iy)] = float(labels[int(np.argmax(counts))])
+            filled[int(ix), int(iy)] = True
+        return _nearest_fill_dense_grid(dense, filled)
+
+    sums = np.zeros((nx, ny), dtype=np.float64)
+    counts = np.zeros((nx, ny), dtype=np.int32)
+    for (ix, iy), value in zip(grid_indices, sample_values):
+        sums[int(ix), int(iy)] += float(value)
+        counts[int(ix), int(iy)] += 1
+    dense = np.zeros((nx, ny), dtype=np.float64)
+    filled = counts > 0
+    dense[filled] = sums[filled] / counts[filled]
+    return _nearest_fill_dense_grid(dense, filled)
+
+
+def _densify_section_samples(
+    grid_shape: tuple[int, int],
+    grid_indices: np.ndarray,
+    sample_values: np.ndarray,
+) -> np.ndarray:
+    nx, ny = grid_shape
+    components = int(sample_values.shape[1])
+    sums = np.zeros((nx, ny, components), dtype=np.float64)
+    counts = np.zeros((nx, ny), dtype=np.int32)
+    for (ix, iy), values in zip(grid_indices, sample_values):
+        sums[int(ix), int(iy)] += np.asarray(values, dtype=np.float64)
+        counts[int(ix), int(iy)] += 1
+    dense = np.zeros((nx, ny, components), dtype=np.float64)
+    filled = counts > 0
+    dense[filled] = sums[filled] / counts[filled, None]
+    return _nearest_fill_dense_grid(dense, filled)
+
+
+def _build_dense_unode_export_payload(
+    labels: np.ndarray,
+    runtime_seed_unodes: dict[str, Any],
+    runtime_seed_fields: dict[str, Any] | None,
+    runtime_seed_unode_sections: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    nx, ny = (int(labels.shape[0]), int(labels.shape[1]))
+    dense_ids, dense_positions, dense_grid_indices = _dense_unode_layout(nx, ny)
+    dense_unodes = {
+        "ids": dense_ids,
+        "positions": dense_positions,
+        "grid_indices": dense_grid_indices,
+        "grid_shape": (nx, ny),
+    }
+    sample_grid_indices = np.asarray(runtime_seed_unodes.get("grid_indices", ()), dtype=np.int32)
+    dense_fields = runtime_seed_fields
+    dense_sections = runtime_seed_unode_sections
+
+    if runtime_seed_fields is not None:
+        label_attribute = str(runtime_seed_fields.get("label_attribute", ""))
+        source_labels = [int(value) for value in runtime_seed_fields.get("source_labels", ())]
+        dense_field_values: dict[str, tuple[float, ...]] = {}
+        for field_name, values in dict(runtime_seed_fields.get("values", {})).items():
+            sample_values = np.asarray(values, dtype=np.float64)
+            if str(field_name) == label_attribute and source_labels:
+                dense_field_values[str(field_name)] = tuple(
+                    float(source_labels[int(labels[ix, iy])]) for ix, iy in dense_grid_indices
+                )
+                continue
+            integer_like = bool(
+                sample_values.ndim == 1
+                and sample_values.size > 0
+                and float(np.max(np.abs(sample_values - np.rint(sample_values)))) <= 1.0e-6
+            )
+            dense_grid = _densify_scalar_samples(
+                (nx, ny),
+                sample_grid_indices,
+                sample_values.reshape(-1),
+                categorical=integer_like,
+            )
+            dense_field_values[str(field_name)] = tuple(
+                float(dense_grid[ix, iy]) for ix, iy in dense_grid_indices
+            )
+        dense_fields = {
+            **runtime_seed_fields,
+            "values": dense_field_values,
+        }
+
+    if runtime_seed_unode_sections is not None:
+        component_counts = dict(runtime_seed_unode_sections.get("component_counts", {}))
+        dense_section_values: dict[str, tuple[tuple[float, ...], ...]] = {}
+        label_attribute = ""
+        source_labels: list[int] = []
+        if dense_fields is not None:
+            label_attribute = str(dense_fields.get("label_attribute", ""))
+            source_labels = [int(value) for value in dense_fields.get("source_labels", ())]
+        for field_name, values in dict(runtime_seed_unode_sections.get("values", {})).items():
+            component_count = int(component_counts.get(str(field_name), 1))
+            if str(field_name) == label_attribute and source_labels and component_count == 1:
+                dense_section_values[str(field_name)] = tuple(
+                    (float(source_labels[int(labels[ix, iy])]),) for ix, iy in dense_grid_indices
+                )
+                continue
+            sample_values = np.asarray(values, dtype=np.float64)
+            if sample_values.ndim == 1:
+                sample_values = sample_values[:, None]
+            if component_count <= 1:
+                dense_grid = _densify_scalar_samples(
+                    (nx, ny),
+                    sample_grid_indices,
+                    sample_values[:, 0],
+                    categorical=bool(
+                        sample_values.size > 0
+                        and float(np.max(np.abs(sample_values[:, 0] - np.rint(sample_values[:, 0])))) <= 1.0e-6
+                    ),
+                )
+                dense_section_values[str(field_name)] = tuple(
+                    (float(dense_grid[ix, iy]),) for ix, iy in dense_grid_indices
+                )
+            else:
+                dense_grid = _densify_section_samples(
+                    (nx, ny),
+                    sample_grid_indices,
+                    sample_values[:, :component_count],
+                )
+                dense_section_values[str(field_name)] = tuple(
+                    tuple(float(value) for value in dense_grid[ix, iy, :component_count])
+                    for ix, iy in dense_grid_indices
+                )
+        dense_sections = {
+            **runtime_seed_unode_sections,
+            "id_order": dense_ids,
+            "values": dense_section_values,
+        }
+
+    return dense_unodes, dense_fields, dense_sections
+
+
 def _connected_components(labels: np.ndarray) -> list[dict[str, Any]]:
     nx, ny = labels.shape
     visited = np.zeros((nx, ny), dtype=bool)
@@ -250,6 +460,25 @@ def write_unode_elle(
     runtime_seed_unodes = None if mesh_state is None else mesh_state.get("_runtime_seed_unodes")
     runtime_seed_fields = None if mesh_state is None else mesh_state.get("_runtime_seed_unode_fields")
     runtime_seed_node_fields = None if mesh_state is None else mesh_state.get("_runtime_seed_node_fields")
+    runtime_seed_unode_sections = None if mesh_state is None else mesh_state.get("_runtime_seed_unode_sections")
+    runtime_seed_node_sections = None if mesh_state is None else mesh_state.get("_runtime_seed_node_sections")
+    runtime_seed_flynn_sections = None if mesh_state is None else (
+        mesh_state.get("_runtime_current_flynn_sections")
+        or mesh_state.get("_runtime_seed_flynn_sections")
+    )
+    if (
+        mesh_state is not None
+        and runtime_seed_unodes is not None
+        and int(mesh_state.get("stats", {}).get("export_dense_unodes", 0)) == 1
+    ):
+        runtime_seed_unodes, runtime_seed_fields, runtime_seed_unode_sections = (
+            _build_dense_unode_export_payload(
+                labels,
+                runtime_seed_unodes,
+                runtime_seed_fields,
+                runtime_seed_unode_sections,
+            )
+        )
     if mesh_state is not None:
         node_locations = [
             (float(node["x"]), float(node["y"]))
@@ -320,18 +549,75 @@ def write_unode_elle(
                 f"{flynn['flynn_id']} {len(flynn['node_ids'])} {node_id_text}\n"
             )
 
-        handle.write("F_ATTRIB_A\n")
-        handle.write("Default 0.00000000e+00\n")
-        for flynn in flynns:
-            handle.write(
-                f"{flynn['flynn_id']} {float(flynn['label']):.8e}\n"
-            )
+        if runtime_seed_flynn_sections is not None and runtime_seed_flynn_sections.get("field_order"):
+            flynn_id_order = [
+                int(value)
+                for value in runtime_seed_flynn_sections.get(
+                    "id_order",
+                    [int(flynn["flynn_id"]) for flynn in flynns],
+                )
+            ]
+            flynn_defaults = dict(runtime_seed_flynn_sections.get("defaults", {}))
+            flynn_values = dict(runtime_seed_flynn_sections.get("values", {}))
+            for field_name in runtime_seed_flynn_sections.get("field_order", ()):
+                dense_values = flynn_values.get(str(field_name))
+                default_value = flynn_defaults.get(str(field_name))
+                if dense_values is None or default_value is None:
+                    continue
+                _write_sparse_numeric_section(
+                    handle,
+                    str(field_name),
+                    flynn_id_order,
+                    dense_values,
+                    tuple(float(value) for value in default_value),
+                )
+        else:
+            handle.write("F_ATTRIB_A\n")
+            handle.write("Default 0.00000000e+00\n")
+            for flynn in flynns:
+                handle.write(
+                    f"{flynn['flynn_id']} {float(flynn['label']):.8e}\n"
+                )
 
         handle.write("LOCATION\n")
         for node_id, (x_coord, y_coord) in enumerate(node_locations):
             handle.write(f"{node_id} {x_coord:.10f} {y_coord:.10f}\n")
 
-        if runtime_seed_node_fields is not None:
+        if runtime_seed_node_sections is not None and runtime_seed_node_sections.get("field_order"):
+            node_id_order = [
+                int(value)
+                for value in runtime_seed_node_sections.get(
+                    "id_order",
+                    list(range(len(node_locations))),
+                )
+            ]
+            node_defaults = dict(runtime_seed_node_sections.get("defaults", {}))
+            node_component_counts = dict(runtime_seed_node_sections.get("component_counts", {}))
+            node_section_values = dict(runtime_seed_node_sections.get("values", {}))
+            runtime_node_values = (
+                dict(runtime_seed_node_fields.get("values", {}))
+                if runtime_seed_node_fields is not None
+                else {}
+            )
+            for field_name in runtime_seed_node_sections.get("field_order", ()):
+                dense_values = node_section_values.get(str(field_name))
+                default_value = node_defaults.get(str(field_name))
+                component_count = int(node_component_counts.get(str(field_name), 1))
+                if dense_values is None or default_value is None:
+                    continue
+                if component_count == 1 and str(field_name) in runtime_node_values:
+                    dense_values = tuple(
+                        (float(value),)
+                        for value in runtime_node_values[str(field_name)]
+                    )
+                _write_sparse_numeric_section(
+                    handle,
+                    str(field_name),
+                    node_id_order,
+                    dense_values,
+                    tuple(float(value) for value in default_value),
+                )
+        elif runtime_seed_node_fields is not None:
             field_order = [
                 str(name)
                 for name in runtime_seed_node_fields.get(
@@ -362,7 +648,47 @@ def write_unode_elle(
             for unode_id, (x_coord, y_coord) in zip(unode_ids, unode_positions):
                 handle.write(f"{unode_id} {x_coord:.10f} {y_coord:.10f}\n")
 
-            if runtime_seed_fields is not None:
+            if runtime_seed_unode_sections is not None and runtime_seed_unode_sections.get("field_order"):
+                unode_defaults = dict(runtime_seed_unode_sections.get("defaults", {}))
+                unode_component_counts = dict(runtime_seed_unode_sections.get("component_counts", {}))
+                unode_section_values = dict(runtime_seed_unode_sections.get("values", {}))
+                runtime_field_values = (
+                    dict(runtime_seed_fields.get("values", {}))
+                    if runtime_seed_fields is not None
+                    else {}
+                )
+                runtime_label_attribute = (
+                    str(runtime_seed_fields.get("label_attribute", ""))
+                    if runtime_seed_fields is not None
+                    else ""
+                )
+                for field_name in runtime_seed_unode_sections.get("field_order", ()):
+                    dense_values = unode_section_values.get(str(field_name))
+                    default_value = unode_defaults.get(str(field_name))
+                    component_count = int(unode_component_counts.get(str(field_name), 1))
+                    if dense_values is None or default_value is None:
+                        continue
+                    if (
+                        str(field_name) == runtime_label_attribute
+                        and str(field_name) in runtime_field_values
+                    ):
+                        dense_values = tuple(
+                            (float(value),)
+                            for value in runtime_field_values[str(field_name)]
+                        )
+                    elif component_count == 1 and str(field_name) in runtime_field_values:
+                        dense_values = tuple(
+                            (float(value),)
+                            for value in runtime_field_values[str(field_name)]
+                        )
+                    _write_sparse_numeric_section(
+                        handle,
+                        str(field_name),
+                        unode_ids,
+                        dense_values,
+                        tuple(float(value) for value in default_value),
+                    )
+            elif runtime_seed_fields is not None:
                 field_order = [
                     str(name) for name in runtime_seed_fields.get("field_order", runtime_seed_fields["values"].keys())
                 ]

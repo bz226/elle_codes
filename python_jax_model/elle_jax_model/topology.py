@@ -9,7 +9,6 @@ import numpy as np
 
 from .artifacts import dominant_grain_map
 from .mesh import MeshFeedbackConfig
-from .simulation import GrainGrowthConfig, run_simulation
 
 
 def _as_labels(data) -> np.ndarray:
@@ -116,6 +115,25 @@ class TopologyTracker:
     history: list[dict[str, Any]] = field(default_factory=list)
     _previous_flynn_id_map: np.ndarray | None = None
     _previous_active_ids: set[int] = field(default_factory=set)
+
+    def _append_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        self.history.append(_to_serializable(snapshot))
+        return snapshot
+
+    def reuse_previous(self, step: int) -> dict[str, Any]:
+        """Record a new snapshot step when topology is known unchanged."""
+
+        if not self.history:
+            raise ValueError("cannot reuse topology snapshot before the first update")
+        previous = dict(self.history[-1])
+        previous["step"] = int(step)
+        previous["active_flynn_ids"] = [int(flynn_id) for flynn_id in previous.get("active_flynn_ids", ())]
+        previous["events"] = {
+            key: [dict(item) if isinstance(item, dict) else item for item in value]
+            for key, value in dict(previous.get("events", {})).items()
+        }
+        previous["flynns"] = [dict(flynn) for flynn in previous.get("flynns", ())]
+        return self._append_snapshot(previous)
 
     def update(self, data, step: int) -> dict[str, Any]:
         labels = _as_labels(data)
@@ -249,8 +267,7 @@ class TopologyTracker:
 
         self._previous_flynn_id_map = current_flynn_id_map
         self._previous_active_ids = current_active_ids
-        self.history.append(_to_serializable(snapshot))
-        return snapshot
+        return self._append_snapshot(snapshot)
 
 
 def write_topology_snapshot(path: str | Path, snapshot: dict[str, Any]) -> Path:
@@ -270,11 +287,12 @@ def write_topology_history(path: str | Path, history: list[dict[str, Any]]) -> P
 
 
 def run_simulation_with_topology(
-    config: GrainGrowthConfig,
+    config: Any,
     steps: int,
     save_every: int,
     on_snapshot: Callable[[int, object, dict[str, Any], dict[str, Any] | None], None] | None = None,
     mesh_feedback: MeshFeedbackConfig | None = None,
+    runner: Callable[..., tuple[object, list[object]]] | None = None,
 ) -> tuple[object, list[object], list[dict[str, Any]]]:
     tracker = TopologyTracker()
     runtime_history: list[dict[str, Any]] = []
@@ -290,7 +308,10 @@ def run_simulation_with_topology(
         if on_snapshot is not None:
             on_snapshot(step, phi, topology_snapshot, mesh_feedback_context)
 
-    final_state, snapshots = run_simulation(
+    if runner is None:
+        from .simulation import run_simulation as runner
+
+    final_state, snapshots = runner(
         config=config,
         steps=steps,
         save_every=save_every,

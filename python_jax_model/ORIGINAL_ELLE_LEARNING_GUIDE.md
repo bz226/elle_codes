@@ -18,6 +18,8 @@ migration path, because that is the path we are trying to rewrite faithfully.
 For a direct parameter-by-parameter mapping between the Python rewrite and
 original ELLE GBM, see
 [ORIGINAL_ELLE_GBM_PARAMETER_MAP.md](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/ORIGINAL_ELLE_GBM_PARAMETER_MAP.md).
+For a workflow-based explanation of `U_ATTRIB_*` meanings, see
+[ELLE_UNODE_ATTRIBUTE_GUIDE.md](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/ELLE_UNODE_ATTRIBUTE_GUIDE.md).
 
 ## 1. The Core Mental Model
 
