@@ -21,14 +21,15 @@ class ShowelleSettings:
 
 
 def _parse_elle_sections(path: str | Path) -> dict[str, tuple[str, ...]]:
-    header_pattern = re.compile(r"[A-Z][A-Z0-9_]*")
+    header_pattern = re.compile(r"^(?P<header>[A-Z][A-Z0-9_]*)(?:\s+[A-Z][A-Z0-9_]*)*$")
     sections: dict[str, list[str]] = {}
     current_section: str | None = None
     for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
         stripped = raw_line.strip()
-        if header_pattern.fullmatch(stripped):
-            current_section = stripped
-            sections.setdefault(stripped, [])
+        match = header_pattern.fullmatch(stripped)
+        if match is not None:
+            current_section = str(match.group("header"))
+            sections.setdefault(current_section, [])
             continue
         if current_section is not None:
             sections[current_section].append(raw_line)

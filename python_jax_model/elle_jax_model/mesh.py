@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,7 +17,9 @@ from .elle_visualize import (
     _parse_location,
     _parse_sparse_values,
 )
+from .faithful_config import parse_faithful_elle_options
 from .mobility import (
+    boundary_segment_energy,
     boundary_segment_mobility,
     caxis_misorientation_degrees,
     load_phase_boundary_db,
@@ -90,6 +93,35 @@ def _periodic_midpoint(point_a: np.ndarray, point_b: np.ndarray) -> np.ndarray:
     return ((point_a + plotted_b) * 0.5) % 1.0
 
 
+def _legacy_fs_roi(
+    seed_unodes: dict[str, Any],
+    runtime_elle_options: dict[str, Any] | None,
+    factor: int,
+) -> float:
+    sample_count = len(seed_unodes.get("positions", ()))
+    if sample_count <= 0:
+        return 0.0
+
+    raw_box = ()
+    if isinstance(runtime_elle_options, dict):
+        raw_box = runtime_elle_options.get("cell_bounding_box", ())
+    box = tuple(
+        (float(point[0]), float(point[1]))
+        for point in raw_box
+        if isinstance(point, (list, tuple)) and len(point) >= 2
+    )
+    if len(box) == 4:
+        base_left = box[0]
+        base_right = box[1]
+        top_left = box[3]
+        box_height = abs(float(top_left[1]) - float(base_left[1]))
+        box_width = abs(float(base_right[0]) - float(base_left[0]))
+        box_scale = max(box_width, box_height)
+        if box_scale > 1.0e-12:
+            return float(float(factor) * np.sqrt((box_scale * box_scale) / (float(sample_count) * np.pi)))
+    return float(float(factor) * np.sqrt(1.0 / (float(sample_count) * np.pi)))
+
+
 def _dilate_mask(mask: np.ndarray, width: int) -> np.ndarray:
     dilated = np.asarray(mask, dtype=bool).copy()
     for _ in range(max(int(width), 0)):
@@ -123,21 +155,6 @@ def _node_neighbors(flynns: list[dict[str, Any]]) -> dict[int, set[int]]:
             right = node_ids[(index + 1) % count]
             neighbors.setdefault(int(node_id), set()).update((int(left), int(right)))
     return neighbors
-
-
-def _parse_options(lines: tuple[str, ...]) -> dict[str, float]:
-    options: dict[str, float] = {}
-    for raw_line in lines:
-        stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = stripped.split()
-        if len(parts) >= 2:
-            try:
-                options[parts[0]] = float(parts[1])
-            except ValueError:
-                continue
-    return options
 
 
 def _parse_numeric_sparse_records(
@@ -208,6 +225,154 @@ def _collect_numeric_section_specs(
     return {
         "field_order": tuple(field_order),
         "id_order": tuple(int(value) for value in ordered_ids),
+        "defaults": defaults,
+        "component_counts": component_counts,
+        "values": values,
+    }
+
+
+def _bootstrap_unode_seed_payload_from_flynn_sections(
+    sections: dict[str, tuple[str, ...]],
+    mesh_state: dict[str, Any],
+    *,
+    source_labels: tuple[int, ...],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    source_labels = tuple(int(value) for value in source_labels)
+    seed_unodes = dict(mesh_state.get("_runtime_seed_unodes", {}))
+    unode_ids = tuple(int(value) for value in seed_unodes.get("ids", ()))
+    unode_grid_indices = tuple(
+        tuple(int(value) for value in ij)
+        for ij in seed_unodes.get("grid_indices", ())
+    )
+    unode_positions = tuple(
+        tuple(float(value) for value in xy)
+        for xy in seed_unodes.get("positions", ())
+    )
+    grid_shape = tuple(int(value) for value in seed_unodes.get("grid_shape", ()))
+
+    if (
+        not source_labels
+        or not unode_ids
+        or not unode_grid_indices
+        or len(grid_shape) != 2
+    ):
+        return None, None
+
+    source_label_mesh_state = {
+        **dict(mesh_state),
+        "flynns": [
+            {
+                **dict(flynn),
+                "label": int(flynn.get("source_label", flynn.get("source_flynn_id", flynn["flynn_id"]))),
+            }
+            for flynn in mesh_state.get("flynns", [])
+        ],
+    }
+    source_label_grid, _ = assign_seed_unodes_from_mesh(source_label_mesh_state, seed_unodes)
+    source_label_per_unode = tuple(
+        int(source_label_grid[int(ix), int(iy)])
+        for ix, iy in unode_grid_indices
+    )
+
+    scalar_values: dict[str, tuple[float, ...]] = {
+        "U_ATTRIB_C": tuple(float(value) for value in source_label_per_unode),
+    }
+    scalar_field_order: list[str] = ["U_ATTRIB_C"]
+
+    section_defaults: dict[str, tuple[float, ...]] = {
+        "U_ATTRIB_C": (0.0,),
+    }
+    section_component_counts: dict[str, int] = {
+        "U_ATTRIB_C": 1,
+    }
+    section_values: dict[str, tuple[tuple[float, ...], ...]] = {
+        "U_ATTRIB_C": tuple((float(value),) for value in source_label_per_unode),
+    }
+    section_field_order: list[str] = ["U_ATTRIB_C"]
+
+    # launch.sh always runs importFFTdata_florian before the first saved step.
+    # That utility initializes these scalar mechanics channels when requested,
+    # using ElleInitUnodeAttribute(...) defaults of 0.0 before filling from tex.out.
+    # When we do not have a frozen mechanics snapshot, keep the legacy field
+    # surface present with zero defaults instead of omitting it entirely.
+    for field_name in ("U_ATTRIB_A", "U_ATTRIB_B", "U_ATTRIB_D", "U_ATTRIB_E"):
+        zero_values = tuple(0.0 for _ in unode_ids)
+        scalar_values[field_name] = zero_values
+        scalar_field_order.append(field_name)
+        section_defaults[field_name] = (0.0,)
+        section_component_counts[field_name] = 1
+        section_values[field_name] = tuple((0.0,) for _ in unode_ids)
+        section_field_order.append(field_name)
+
+    dislocden_values: tuple[float, ...]
+    dislocden_defaults = (0.0,)
+    parsed_dislocden = _parse_numeric_sparse_records(sections.get("DISLOCDEN", ()))
+    if parsed_dislocden is not None:
+        default_value, sparse_values = parsed_dislocden
+        if len(default_value) >= 1:
+            dislocden_defaults = (float(default_value[0]),)
+        dislocden_values = tuple(
+            float(sparse_values.get(int(source_label), dislocden_defaults)[0])
+            for source_label in source_label_per_unode
+        )
+    else:
+        dislocden_values = tuple(0.0 for _ in unode_ids)
+    scalar_values["U_DISLOCDEN"] = dislocden_values
+    scalar_field_order.append("U_DISLOCDEN")
+    section_defaults["U_DISLOCDEN"] = dislocden_defaults
+    section_component_counts["U_DISLOCDEN"] = 1
+    section_values["U_DISLOCDEN"] = tuple((float(value),) for value in dislocden_values)
+    section_field_order.append("U_DISLOCDEN")
+
+    parsed_euler = _parse_numeric_sparse_records(sections.get("EULER_3", ()))
+    if parsed_euler is not None:
+        default_value, sparse_values = parsed_euler
+        euler_default = tuple(float(value) for value in default_value)
+        if len(euler_default) >= 3:
+            euler_values = tuple(
+                tuple(float(value) for value in sparse_values.get(int(source_label), euler_default)[:3])
+                for source_label in source_label_per_unode
+            )
+            section_defaults["U_EULER_3"] = euler_default[:3]
+            section_component_counts["U_EULER_3"] = 3
+            section_values["U_EULER_3"] = euler_values
+            section_field_order.append("U_EULER_3")
+
+    runtime_seed_fields = {
+        "label_attribute": "U_ATTRIB_C",
+        "field_order": tuple(scalar_field_order),
+        "source_labels": tuple(int(value) for value in source_labels),
+        "roi": float(_estimate_seed_unode_roi(seed_unodes)),
+        "unode_area": float(_estimate_seed_unode_area(seed_unodes)),
+        "values": scalar_values,
+    }
+    runtime_seed_sections = {
+        "field_order": tuple(section_field_order),
+        "id_order": tuple(int(value) for value in unode_ids),
+        "defaults": section_defaults,
+        "component_counts": section_component_counts,
+        "values": section_values,
+    }
+    return runtime_seed_fields, runtime_seed_sections
+
+
+def _ensure_seed_flynn_id_section(
+    payload: dict[str, Any],
+    *,
+    flynn_ids: list[int],
+) -> dict[str, Any]:
+    field_order = list(payload.get("field_order", ()))
+    defaults = dict(payload.get("defaults", {}))
+    component_counts = dict(payload.get("component_counts", {}))
+    values = dict(payload.get("values", {}))
+    if "F_ATTRIB_C" not in values:
+        field_order.append("F_ATTRIB_C")
+        defaults["F_ATTRIB_C"] = (0.0,)
+        component_counts["F_ATTRIB_C"] = 1
+        values["F_ATTRIB_C"] = tuple((float(flynn_id),) for flynn_id in flynn_ids)
+    return {
+        "field_order": tuple(str(name) for name in field_order),
+        "id_order": tuple(int(value) for value in payload.get("id_order", ())),
         "defaults": defaults,
         "component_counts": component_counts,
         "values": values,
@@ -393,14 +558,16 @@ def load_elle_mesh_seed(
         )
 
     flynns: list[dict[str, Any]] = []
-    missing_labels: list[int] = []
+    extended_source_labels = 0
     for component_index, flynn in enumerate(flynn_records):
         original_flynn_id = int(flynn["flynn_id"])
         source_label = int(flynn_label_values.get(original_flynn_id, original_flynn_id))
         compact_label = source_to_compact.get(source_label)
         if compact_label is None:
-            missing_labels.append(original_flynn_id)
-            continue
+            compact_label = int(len(source_labels))
+            source_to_compact[int(source_label)] = int(compact_label)
+            source_labels.append(int(source_label))
+            extended_source_labels += 1
         remapped_nodes = [int(node_id_map[int(node_id)]) for node_id in flynn["node_ids"] if int(node_id) in node_id_map]
         if len(remapped_nodes) < 3:
             continue
@@ -434,11 +601,13 @@ def load_elle_mesh_seed(
         "holes_skipped": 0,
         "mesh_seed_source": "elle",
         "mesh_seed_path": str(path),
-        "mesh_seed_missing_flynns": int(len(missing_labels)),
+        "mesh_seed_missing_flynns": 0,
+        "mesh_seed_extended_source_labels": int(extended_source_labels),
     }
     mesh_state = _serializable_mesh(nodes, flynns, node_neighbors, node_flynn_membership, stats)
 
-    option_values = _parse_options(sections.get("OPTIONS", ()))
+    elle_options = parse_faithful_elle_options(sections.get("OPTIONS", ()))
+    option_values = dict(elle_options.scalar_values)
     relax_overrides: dict[str, float] = {}
     switch_distance = float(option_values["SwitchDistance"]) if "SwitchDistance" in option_values else 0.0
     if switch_distance > 0.0:
@@ -456,12 +625,8 @@ def load_elle_mesh_seed(
     if "Timestep" in option_values:
         relax_overrides["time_step"] = float(option_values["Timestep"])
 
-    for key in ("SwitchDistance", "MinNodeSeparation", "MaxNodeSeparation", "SpeedUp", "Timestep"):
-        if key in option_values:
-            mesh_state["stats"][f"elle_option_{key.lower()}"] = float(option_values[key])
-    for key in ("BoundaryWidth", "UnitLength", "MassIncrement"):
-        if key in option_values:
-            mesh_state["stats"][f"elle_option_{key.lower()}"] = float(option_values[key])
+    for key, value in option_values.items():
+        mesh_state["stats"][f"elle_option_{str(key).lower()}"] = float(value)
 
     unode_ids = tuple(int(unode_id) for unode_id in label_seed.get("unode_ids", ()))
     unode_positions = tuple(tuple(float(value) for value in xy) for xy in label_seed.get("unode_positions", ()))
@@ -475,33 +640,56 @@ def load_elle_mesh_seed(
             "grid_indices": unode_grid_indices,
             "grid_shape": tuple(int(value) for value in grid_shape),
         }
-    if label_seed.get("unode_field_values"):
+    bootstrap_unode_fields = None
+    bootstrap_unode_sections = None
+    if (
+        "_runtime_seed_unodes" in mesh_state
+        and not label_seed.get("unode_field_values")
+        and not any(str(name).startswith("U_") and str(name) != "UNODES" for name in sections)
+    ):
+        bootstrap_unode_fields, bootstrap_unode_sections = (
+            _bootstrap_unode_seed_payload_from_flynn_sections(
+                sections,
+                mesh_state,
+                source_labels=tuple(int(value) for value in source_labels),
+            )
+        )
+    if label_seed.get("unode_field_values") or bootstrap_unode_fields is not None:
+        field_payload = (
+            {
+                "label_attribute": str(label_seed.get("attribute", "U_ATTRIB_A")),
+                "field_order": tuple(str(name) for name in label_seed.get("unode_field_order", ())),
+                "source_labels": tuple(int(value) for value in source_labels),
+                "roi": float(_estimate_seed_unode_roi(mesh_state["_runtime_seed_unodes"]))
+                if "_runtime_seed_unodes" in mesh_state
+                else 0.0,
+                "unode_area": float(_estimate_seed_unode_area(mesh_state["_runtime_seed_unodes"]))
+                if "_runtime_seed_unodes" in mesh_state
+                else 0.0,
+                "values": {
+                    str(name): tuple(float(value) for value in values)
+                    for name, values in dict(label_seed.get("unode_field_values", {})).items()
+                },
+            }
+            if label_seed.get("unode_field_values")
+            else bootstrap_unode_fields
+        )
         mesh_state["_runtime_seed_unode_fields"] = {
-            "label_attribute": str(label_seed.get("attribute", "U_ATTRIB_A")),
-            "field_order": tuple(str(name) for name in label_seed.get("unode_field_order", ())),
-            "source_labels": tuple(int(value) for value in source_labels),
-            "roi": float(_estimate_seed_unode_roi(mesh_state["_runtime_seed_unodes"]))
-            if "_runtime_seed_unodes" in mesh_state
-            else 0.0,
-            "unode_area": float(_estimate_seed_unode_area(mesh_state["_runtime_seed_unodes"]))
-            if "_runtime_seed_unodes" in mesh_state
-            else 0.0,
-            "values": {
-                str(name): tuple(float(value) for value in values)
-                for name, values in dict(label_seed.get("unode_field_values", {})).items()
-            },
+            **dict(field_payload or {}),
         }
     unode_section_names = [
         str(name)
         for name in sections
         if str(name).startswith("U_") and str(name) != "UNODES"
     ]
-    if unode_ids:
+    if unode_ids and unode_section_names:
         mesh_state["_runtime_seed_unode_sections"] = _collect_numeric_section_specs(
             sections,
             unode_section_names,
             list(unode_ids),
         )
+    elif bootstrap_unode_sections is not None:
+        mesh_state["_runtime_seed_unode_sections"] = bootstrap_unode_sections
     node_field_names = [
         str(name)
         for name in sections
@@ -520,6 +708,7 @@ def load_elle_mesh_seed(
             "positions": tuple((float(xy[0]), float(xy[1])) for xy in nodes),
             "values": node_field_values,
         }
+    mesh_state["_runtime_elle_options"] = elle_options.to_runtime_dict()
     if ordered_node_ids:
         node_section_names = [
             str(name) for name in sections if str(name).startswith("N_")
@@ -538,6 +727,10 @@ def load_elle_mesh_seed(
         sections,
         flynn_section_names,
         [int(flynn["flynn_id"]) for flynn in flynns],
+    )
+    mesh_state["_runtime_seed_flynn_sections"] = _ensure_seed_flynn_id_section(
+        mesh_state["_runtime_seed_flynn_sections"],
+        flynn_ids=[int(flynn["flynn_id"]) for flynn in flynns],
     )
 
     return mesh_state, relax_overrides
@@ -673,11 +866,14 @@ def assign_seed_unodes_from_mesh(
     if sample_points.shape[0] != sample_grid_indices.shape[0]:
         raise ValueError("seed unode positions and grid indices must have the same length")
 
-    unassigned_mask = np.ones(sample_points.shape[0], dtype=bool)
+    best_point_labels = np.full(sample_points.shape[0], -1, dtype=np.int32)
+    best_point_area = np.full(sample_points.shape[0], np.inf, dtype=np.float64)
+    locked_point_labels = np.zeros(sample_points.shape[0], dtype=bool)
     assigned = 0
     raster_filled = 0
 
     flynn_entries = []
+    flynn_by_label: dict[int, tuple[float, int, np.ndarray]] = {}
     for flynn in mesh_state["flynns"]:
         node_ids = [int(node_id) for node_id in flynn["node_ids"]]
         if len(node_ids) < 3:
@@ -686,25 +882,67 @@ def assign_seed_unodes_from_mesh(
         if len(polygon_points) < 3:
             continue
         area = abs(_polygon_signed_area_from_points(polygon_points))
-        flynn_entries.append((float(area), int(flynn["label"]), polygon_points))
+        entry = (float(area), int(flynn["label"]), polygon_points)
+        flynn_entries.append(entry)
+        flynn_by_label[int(flynn["label"])] = entry
 
-    for _, label, polygon_points in sorted(flynn_entries, key=lambda item: item[0], reverse=True):
-        if not np.any(unassigned_mask):
+    # Match the first CheckUnodesFlynn decision first: if the current host
+    # still contains the unode, keep that host rather than reassigning.
+    if fallback_labels is not None:
+        fallback_np = np.asarray(fallback_labels, dtype=np.int32)
+        current_point_labels = fallback_np[
+            sample_grid_indices[:, 0],
+            sample_grid_indices[:, 1],
+        ]
+        for label in sorted(
+            {
+                int(value)
+                for value in np.unique(current_point_labels)
+                if int(value) in flynn_by_label
+            }
+        ):
+            _, _entry_label, polygon_points = flynn_by_label[int(label)]
+            current_mask = (current_point_labels == int(label)) & (best_point_labels < 0)
+            if not np.any(current_mask):
+                continue
+            inside_mask = _mark_seed_points_in_polygon(
+                sample_points,
+                polygon_points,
+                active_mask=current_mask,
+            )
+            if not np.any(inside_mask):
+                continue
+            assigned_indices = np.flatnonzero(inside_mask)
+            best_point_labels[assigned_indices] = int(label)
+            locked_point_labels[assigned_indices] = True
+
+    # For unodes that are no longer in their current host, fall back to the
+    # smallest matching polygon. This keeps the projection stable on our
+    # plotted polygons while still preserving the old current-host-first rule.
+    for area, label, polygon_points in flynn_entries:
+        improvement_mask = (~locked_point_labels) & (best_point_area > float(area))
+        if not np.any(improvement_mask):
             continue
         inside_mask = _mark_seed_points_in_polygon(
             sample_points,
             polygon_points,
-            active_mask=unassigned_mask,
+            active_mask=improvement_mask,
         )
         if not np.any(inside_mask):
             continue
         assigned_indices = np.flatnonzero(inside_mask)
+        best_point_labels[assigned_indices] = int(label)
+        best_point_area[assigned_indices] = float(area)
+
+    if np.any(best_point_labels >= 0):
+        assigned_indices = np.flatnonzero(best_point_labels >= 0)
         mesh_labels[
             sample_grid_indices[assigned_indices, 0],
             sample_grid_indices[assigned_indices, 1],
-        ] = int(label)
-        unassigned_mask[assigned_indices] = False
-        assigned += int(assigned_indices.size)
+        ] = best_point_labels[assigned_indices]
+        assigned = int(assigned_indices.size)
+
+    unassigned_mask = best_point_labels < 0
 
     if np.any(unassigned_mask):
         # Rebuilt faithful meshes can temporarily leave small polygon gaps or
@@ -1191,6 +1429,8 @@ def _nearest_same_label_vector_value(
     vector_values: np.ndarray,
     candidate_mask: np.ndarray,
     point_index: int,
+    *,
+    roi: float | None = None,
 ) -> np.ndarray | None:
     candidate_indices = np.flatnonzero(np.asarray(candidate_mask, dtype=bool))
     if candidate_indices.size == 0:
@@ -1198,37 +1438,34 @@ def _nearest_same_label_vector_value(
     point = np.asarray(sample_points[int(point_index)], dtype=np.float64)
     deltas = _periodic_relative(sample_points[candidate_indices], point)
     distances_sq = np.sum(deltas * deltas, axis=1)
+    if roi is not None and float(roi) > 0.0:
+        roi_sq = float(roi) * float(roi)
+        within_roi = distances_sq <= roi_sq
+        if not np.any(within_roi):
+            return None
+        candidate_indices = candidate_indices[within_roi]
+        distances_sq = distances_sq[within_roi]
     nearest_index = int(candidate_indices[int(np.argmin(distances_sq))])
     return np.asarray(vector_values[nearest_index], dtype=np.float64).copy()
 
 
-def _mean_vector_value(
+def _distance_weighted_vector_value(
+    sample_points: np.ndarray,
     vector_values: np.ndarray,
     candidate_mask: np.ndarray,
+    point_index: int,
 ) -> np.ndarray | None:
     candidate_indices = np.flatnonzero(np.asarray(candidate_mask, dtype=bool))
     if candidate_indices.size == 0:
         return None
-    return np.asarray(np.mean(vector_values[candidate_indices], axis=0), dtype=np.float64)
-
-
-def _flynn_mean_vector_value(
-    vector_values: np.ndarray,
-    label_values: np.ndarray,
-    target_label: int,
-    *,
-    exclude_index: int | None = None,
-) -> np.ndarray | None:
-    candidate_mask = np.asarray(label_values, dtype=np.int32) == int(target_label)
-    if exclude_index is not None and 0 <= int(exclude_index) < candidate_mask.size:
-        candidate_mask[int(exclude_index)] = False
-    donor_value = _mean_vector_value(vector_values, candidate_mask)
-    if donor_value is not None:
-        return donor_value
-    return _mean_vector_value(
-        vector_values,
-        np.asarray(label_values, dtype=np.int32) == int(target_label),
-    )
+    point = np.asarray(sample_points[int(point_index)], dtype=np.float64)
+    deltas = _periodic_relative(sample_points[candidate_indices], point)
+    distances = np.sqrt(np.sum(deltas * deltas, axis=1))
+    distance_total = float(np.sum(distances))
+    if distance_total <= 1.0e-12:
+        return None
+    weighted = np.sum(vector_values[candidate_indices] * distances[:, None], axis=0) / distance_total
+    return np.asarray(weighted, dtype=np.float64)
 
 
 def _apply_mass_conservation(
@@ -2325,6 +2562,10 @@ def update_seed_unode_sections(
     component_counts = dict(seed_sections.get("component_counts", {}))
     updated_orientation_unodes = 0
     fallback_orientation_unodes = 0
+    old_value_fallback_orientation_unodes = 0
+    reassign_roi = 0.0
+    if sample_points.shape[0] > 0:
+        reassign_roi = float(8.0 * np.sqrt(1.0 / (float(sample_points.shape[0]) * np.pi)))
 
     for field_name in seed_sections.get("field_order", ()):
         component_count = int(component_counts.get(str(field_name), 1))
@@ -2345,17 +2586,20 @@ def update_seed_unode_sections(
                 current_values,
                 donor_mask,
                 int(point_index),
+                roi=reassign_roi,
             )
             if donor_value is None:
-                donor_value = _flynn_mean_vector_value(
+                donor_value = _distance_weighted_vector_value(
+                    sample_points,
                     original_values,
-                    sample_target,
-                    target_label,
-                    exclude_index=int(point_index),
+                    donor_mask,
+                    int(point_index),
                 )
                 if donor_value is None:
-                    continue
-                fallback_orientation_unodes += 1
+                    donor_value = np.asarray(original_values[int(point_index)], dtype=np.float64).copy()
+                    old_value_fallback_orientation_unodes += 1
+                else:
+                    fallback_orientation_unodes += 1
             if np.max(np.abs(current_values[int(point_index)] - donor_value)) > 1.0e-12:
                 updated_orientation_unodes += 1
             current_values[int(point_index)] = donor_value
@@ -2370,6 +2614,7 @@ def update_seed_unode_sections(
     }, {
         "updated_orientation_unodes": int(updated_orientation_unodes),
         "fallback_orientation_unodes": int(fallback_orientation_unodes),
+        "old_value_fallback_orientation_unodes": int(old_value_fallback_orientation_unodes),
     }
 
 
@@ -2409,6 +2654,52 @@ def _node_index_mapping(previous_positions: np.ndarray, current_positions: np.nd
         distances_sq = np.sum(deltas * deltas, axis=1)
         mapping[int(current_index)] = int(np.argmin(distances_sq))
     return mapping
+
+
+def _rebuild_remaining_node_order(
+    previous_positions: np.ndarray,
+    current_positions: np.ndarray,
+    *,
+    processed_old_ids: list[int],
+    remaining_old_ids: list[int],
+    rng: np.random.Generator,
+) -> list[int]:
+    if current_positions.size == 0:
+        return []
+
+    consumed_current_ids: set[int] = set()
+
+    def _map_old_ids(old_ids: list[int]) -> list[int]:
+        mapped_ids: list[int] = []
+        if previous_positions.size == 0:
+            return mapped_ids
+        for old_id in old_ids:
+            if int(old_id) < 0 or int(old_id) >= previous_positions.shape[0]:
+                continue
+            old_point = np.asarray(previous_positions[int(old_id)], dtype=np.float64)
+            deltas = _periodic_relative(current_positions, old_point)
+            distances_sq = np.sum(deltas * deltas, axis=1)
+            for current_id in np.argsort(distances_sq):
+                current_id = int(current_id)
+                if current_id in consumed_current_ids:
+                    continue
+                consumed_current_ids.add(current_id)
+                mapped_ids.append(current_id)
+                break
+        return mapped_ids
+
+    _map_old_ids([int(node_id) for node_id in processed_old_ids])
+    remaining_ids = _map_old_ids([int(node_id) for node_id in remaining_old_ids])
+
+    new_ids = [
+        int(node_id)
+        for node_id in range(current_positions.shape[0])
+        if int(node_id) not in consumed_current_ids
+    ]
+    if new_ids:
+        new_ids = [int(node_id) for node_id in rng.permutation(np.asarray(new_ids, dtype=np.int32))]
+
+    return [int(node_id) for node_id in remaining_ids + new_ids]
 
 
 def _segment_swept_mask(
@@ -2830,11 +3121,16 @@ def compute_mesh_motion_velocity(
         speed_up=feedback_config.relax_config.speed_up,
         time_step=feedback_config.relax_config.time_step,
         switch_distance=feedback_config.relax_config.switch_distance,
+        min_angle_degrees=feedback_config.relax_config.min_angle_degrees,
         movement_model=feedback_config.relax_config.movement_model,
+        use_diagonal_trials=feedback_config.relax_config.use_diagonal_trials,
+        use_elle_physical_units=feedback_config.relax_config.use_elle_physical_units,
         boundary_energy=feedback_config.relax_config.boundary_energy,
         random_seed=feedback_config.relax_config.random_seed,
         min_node_separation_factor=feedback_config.relax_config.min_node_separation_factor,
         max_node_separation_factor=feedback_config.relax_config.max_node_separation_factor,
+        temperature_c=feedback_config.relax_config.temperature_c,
+        phase_db_path=feedback_config.relax_config.phase_db_path,
     )
     motion_mesh_state = (
         relax_mesh_state(base_mesh_state, motion_config)
@@ -2997,13 +3293,19 @@ def couple_mesh_to_order_parameters(
     topology_config = MeshRelaxationConfig(
         steps=0,
         topology_steps=feedback_config.relax_config.topology_steps,
+        time_step=feedback_config.relax_config.time_step,
         speed_up=feedback_config.relax_config.speed_up,
         switch_distance=feedback_config.relax_config.switch_distance,
+        min_angle_degrees=feedback_config.relax_config.min_angle_degrees,
         movement_model=feedback_config.relax_config.movement_model,
+        use_diagonal_trials=feedback_config.relax_config.use_diagonal_trials,
+        use_elle_physical_units=feedback_config.relax_config.use_elle_physical_units,
         boundary_energy=feedback_config.relax_config.boundary_energy,
         random_seed=feedback_config.relax_config.random_seed,
         min_node_separation_factor=feedback_config.relax_config.min_node_separation_factor,
         max_node_separation_factor=feedback_config.relax_config.max_node_separation_factor,
+        temperature_c=feedback_config.relax_config.temperature_c,
+        phase_db_path=feedback_config.relax_config.phase_db_path,
     )
     mesh_state = (
         relax_mesh_state(motion_mesh_state, topology_config)
@@ -3023,25 +3325,104 @@ def couple_mesh_to_order_parameters(
             base_mesh_labels = np.asarray(mesh_labels, dtype=np.int32).copy()
             label_overrides = mesh_state.get("_runtime_label_overrides")
             label_remap_mode = "full_seed_remap"
+            incremental_remap_stages = int(
+                mesh_state.get(
+                    "_runtime_incremental_label_remap_stages",
+                    0 if base_mesh_state is None else base_mesh_state.get("_runtime_incremental_label_remap_stages", 0),
+                )
+            )
+            topology_static = bool(
+                base_mesh_state is not None
+                and int(mesh_state.get("stats", {}).get("mesh_inserted_nodes", 0)) == 0
+                and int(mesh_state.get("stats", {}).get("mesh_removed_nodes", 0)) == 0
+                and int(mesh_state.get("stats", {}).get("mesh_switched_triples", 0)) == 0
+                and int(mesh_state.get("stats", {}).get("mesh_merged_flynns", 0)) == 0
+                and int(mesh_state.get("stats", {}).get("mesh_split_flynns", 0)) == 0
+                and int(mesh_state.get("stats", {}).get("mesh_deleted_small_flynns", 0)) == 0
+            )
             if label_overrides is not None:
                 override_np = np.asarray(label_overrides, dtype=np.int32)
                 if override_np.shape == mesh_labels.shape:
                     override_mask = override_np >= 0
                     if np.any(override_mask):
-                        mesh_labels = np.asarray(mesh_labels, dtype=np.int32).copy()
-                        mesh_labels[override_mask] = override_np[override_mask]
-                        seed_assignment_stats["nucleation_override_unodes"] = int(
-                            np.count_nonzero(override_mask)
-                        )
                         fragment_merge_limit = int(
                             mesh_state.get("stats", {}).get("nucleation_fragment_merge_max_size", 0)
                         )
-                        mesh_labels, connectivity_stats = _enforce_connected_label_ownership(
-                            mesh_labels,
+                        candidate_results: list[tuple[str, np.ndarray, dict[str, int], int]] = []
+
+                        full_override_labels = np.asarray(base_mesh_labels, dtype=np.int32).copy()
+                        full_override_labels[override_mask] = override_np[override_mask]
+                        full_override_labels, full_connectivity_stats = _enforce_connected_label_ownership(
+                            full_override_labels,
                             reference_labels=current_labels,
                             merge_max_component_size=fragment_merge_limit if fragment_merge_limit > 0 else None,
                         )
-                        seed_assignment_stats.update(connectivity_stats)
+                        full_component_count = int(
+                            len(_connected_components(np.asarray(full_override_labels, dtype=np.int32)))
+                        )
+                        candidate_results.append(
+                            (
+                                "full_seed_remap",
+                                np.asarray(full_override_labels, dtype=np.int32),
+                                dict(full_connectivity_stats),
+                                full_component_count,
+                            )
+                        )
+
+                        if topology_static:
+                            # FS_flynn2unode_attribute::CheckUnodesFlynn() keeps the
+                            # current host-flynn assignment when a unode is still
+                            # inside that host, and only searches for a new host
+                            # after a real boundary crossing. Apply the same host-
+                            # repair preference underneath sparse nucleation
+                            # fallback overrides when the saved mesh is topology-
+                            # static.
+                            incremental_override_labels, incremental_stats = incremental_seed_unode_reassignment(
+                                current_labels,
+                                mesh_labels,
+                                base_mesh_state,
+                                motion_mesh_state,
+                                seed_unodes,
+                            )
+                            incremental_override_labels = np.asarray(
+                                incremental_override_labels,
+                                dtype=np.int32,
+                            )
+                            incremental_override_labels[override_mask] = override_np[override_mask]
+                            incremental_override_labels, incremental_connectivity_stats = _enforce_connected_label_ownership(
+                                incremental_override_labels,
+                                reference_labels=current_labels,
+                                merge_max_component_size=fragment_merge_limit if fragment_merge_limit > 0 else None,
+                            )
+                            incremental_component_count = int(
+                                len(_connected_components(np.asarray(incremental_override_labels, dtype=np.int32)))
+                            )
+                            seed_assignment_stats["incremental_swept_unodes"] = int(
+                                incremental_stats.get("swept_unodes", 0)
+                            )
+                            seed_assignment_stats["incremental_changed_unodes"] = int(
+                                incremental_stats.get("changed_unodes", 0)
+                            )
+                            seed_assignment_stats["incremental_component_count"] = int(
+                                incremental_component_count
+                            )
+                            seed_assignment_stats["full_remap_component_count"] = int(full_component_count)
+                            candidate_results.append(
+                                (
+                                    "incremental_host_repair_overrides",
+                                    np.asarray(incremental_override_labels, dtype=np.int32),
+                                    dict(incremental_connectivity_stats),
+                                    incremental_component_count,
+                                )
+                            )
+
+                        best_mode, best_labels, best_connectivity_stats, _best_component_count = min(
+                            candidate_results,
+                            key=lambda item: (int(item[3]), 0 if item[0].startswith("incremental_") else 1),
+                        )
+                        mesh_labels = np.asarray(best_labels, dtype=np.int32)
+                        seed_assignment_stats.update(best_connectivity_stats)
+                        label_remap_mode = str(best_mode)
                         refreshed_override = np.full(mesh_labels.shape, -1, dtype=np.int32)
                         refreshed_mask = mesh_labels != base_mesh_labels
                         if np.any(refreshed_mask):
@@ -3054,12 +3435,51 @@ def couple_mesh_to_order_parameters(
                 fragment_merge_limit = int(
                     mesh_state.get("stats", {}).get("nucleation_fragment_merge_max_size", 0)
                 )
-                mesh_labels, connectivity_stats = _enforce_connected_label_ownership(
-                    mesh_labels,
+                full_remap_labels, connectivity_stats = _enforce_connected_label_ownership(
+                    np.asarray(mesh_labels, dtype=np.int32).copy(),
                     reference_labels=current_labels,
                     merge_max_component_size=fragment_merge_limit if fragment_merge_limit > 0 else None,
                 )
+                full_component_count = int(
+                    len(_connected_components(np.asarray(full_remap_labels, dtype=np.int32)))
+                )
+                mesh_labels = np.asarray(full_remap_labels, dtype=np.int32)
                 seed_assignment_stats.update(connectivity_stats)
+                if topology_static:
+                    # FS_flynn2unode_attribute::CheckUnodesFlynn() still prefers
+                    # current-host retention when the mesh itself did not change
+                    # topology. A rejected nucleation rebuild leaves the saved mesh
+                    # topology-static, so prefer incremental host repair unless the
+                    # full remap is less fragmented.
+                    incremental_labels, incremental_stats = incremental_seed_unode_reassignment(
+                        current_labels,
+                        mesh_labels,
+                        base_mesh_state,
+                        motion_mesh_state,
+                        seed_unodes,
+                    )
+                    incremental_labels, incremental_connectivity_stats = _enforce_connected_label_ownership(
+                        np.asarray(incremental_labels, dtype=np.int32),
+                        reference_labels=current_labels,
+                        merge_max_component_size=fragment_merge_limit if fragment_merge_limit > 0 else None,
+                    )
+                    incremental_component_count = int(
+                        len(_connected_components(np.asarray(incremental_labels, dtype=np.int32)))
+                    )
+                    seed_assignment_stats["incremental_swept_unodes"] = int(
+                        incremental_stats.get("swept_unodes", 0)
+                    )
+                    seed_assignment_stats["incremental_changed_unodes"] = int(
+                        incremental_stats.get("changed_unodes", 0)
+                    )
+                    seed_assignment_stats["incremental_component_count"] = int(
+                        incremental_component_count
+                    )
+                    seed_assignment_stats["full_remap_component_count"] = int(full_component_count)
+                    if incremental_component_count <= full_component_count:
+                        mesh_labels = np.asarray(incremental_labels, dtype=np.int32)
+                        seed_assignment_stats.update(incremental_connectivity_stats)
+                        label_remap_mode = "incremental_host_repair_rejected_rebuild"
                 refreshed_override = np.full(mesh_labels.shape, -1, dtype=np.int32)
                 refreshed_mask = mesh_labels != base_mesh_labels
                 if np.any(refreshed_mask):
@@ -3069,12 +3489,6 @@ def couple_mesh_to_order_parameters(
                     np.count_nonzero(refreshed_mask)
                 )
             else:
-                incremental_remap_stages = int(
-                    mesh_state.get(
-                        "_runtime_incremental_label_remap_stages",
-                        0 if base_mesh_state is None else base_mesh_state.get("_runtime_incremental_label_remap_stages", 0),
-                    )
-                )
                 if incremental_remap_stages > 0 and base_mesh_state is not None:
                     full_remap_labels = np.asarray(mesh_labels, dtype=np.int32).copy()
                     mesh_labels, incremental_stats = incremental_seed_unode_reassignment(
@@ -3120,6 +3534,40 @@ def couple_mesh_to_order_parameters(
                         )
                     else:
                         mesh_state.pop("_runtime_incremental_label_remap_stages", None)
+                elif topology_static:
+                    # FS_flynn2unode_attribute::CheckUnodesFlynn() keeps the current
+                    # host-flynn assignment when a unode is still inside that host,
+                    # and only searches for a new host after a real boundary crossing.
+                    # On topology-static mesh feedback steps, prefer the same
+                    # swept-region host-repair behavior over a full remap.
+                    full_remap_labels = np.asarray(mesh_labels, dtype=np.int32).copy()
+                    mesh_labels, incremental_stats = incremental_seed_unode_reassignment(
+                        current_labels,
+                        mesh_labels,
+                        base_mesh_state,
+                        motion_mesh_state,
+                        seed_unodes,
+                    )
+                    incremental_component_count = int(
+                        len(_connected_components(np.asarray(mesh_labels, dtype=np.int32)))
+                    )
+                    full_component_count = int(
+                        len(_connected_components(np.asarray(full_remap_labels, dtype=np.int32)))
+                    )
+                    seed_assignment_stats["incremental_swept_unodes"] = int(
+                        incremental_stats.get("swept_unodes", 0)
+                    )
+                    seed_assignment_stats["incremental_changed_unodes"] = int(
+                        incremental_stats.get("changed_unodes", 0)
+                    )
+                    seed_assignment_stats["incremental_component_count"] = int(incremental_component_count)
+                    seed_assignment_stats["full_remap_component_count"] = int(full_component_count)
+                    if incremental_component_count > full_component_count:
+                        mesh_labels = full_remap_labels
+                        label_remap_mode = "full_seed_remap_host_repair_fallback"
+                        seed_assignment_stats["incremental_fragmentation_fallback"] = 1
+                    else:
+                        label_remap_mode = "incremental_host_repair"
             # Keep label ownership tied to the full moved flynn map. Replacing the
             # full remap with a swept-only incremental splice leaves stale labels
             # behind after topology changes, which fragments the rasterized field
@@ -3405,6 +3853,7 @@ def _trial_node_energy(
     nodes: np.ndarray,
     *,
     boundary_energy: float,
+    segment_boundary_energies: list[float] | tuple[float, ...] | np.ndarray | None = None,
 ) -> float:
     neighbor_points = _ordered_neighbor_points(
         np.asarray(trial_xy, dtype=np.float64),
@@ -3414,7 +3863,13 @@ def _trial_node_energy(
     if neighbor_points.size == 0:
         return 0.0
     delta = neighbor_points - np.asarray(trial_xy, dtype=np.float64)[None, :]
-    return float(boundary_energy) * float(np.linalg.norm(delta, axis=1).sum())
+    lengths = np.linalg.norm(delta, axis=1)
+    if segment_boundary_energies is None:
+        return float(boundary_energy) * float(lengths.sum())
+    weights = np.asarray(segment_boundary_energies, dtype=np.float64)
+    if weights.ndim != 1 or weights.size < lengths.size:
+        return float(boundary_energy) * float(lengths.sum())
+    return float(np.sum(lengths * weights[: lengths.size]))
 
 
 def _surface_force_from_trial_energies(
@@ -3426,6 +3881,7 @@ def _surface_force_from_trial_energies(
     flynns: list[dict[str, Any]] | None = None,
     switch_distance: float,
     boundary_energy: float,
+    segment_boundary_energies: list[float] | tuple[float, ...] | np.ndarray | None = None,
     use_diagonal_trials: bool = False,
     neighbor_points: np.ndarray | None = None,
     stored_energy_context: dict[str, Any] | None = None,
@@ -3461,7 +3917,15 @@ def _surface_force_from_trial_energies(
 
     trial_positions = node_xy[None, :] + np.asarray(trial_offsets, dtype=np.float64)
     delta = neighbor_points[None, :, :] - trial_positions[:, None, :]
-    energies = float(boundary_energy) * np.linalg.norm(delta, axis=2).sum(axis=1)
+    lengths = np.linalg.norm(delta, axis=2)
+    if segment_boundary_energies is None:
+        energies = float(boundary_energy) * lengths.sum(axis=1)
+    else:
+        weights = np.asarray(segment_boundary_energies, dtype=np.float64)
+        if weights.ndim != 1 or weights.size < lengths.shape[1]:
+            energies = float(boundary_energy) * lengths.sum(axis=1)
+        else:
+            energies = np.sum(lengths * weights[None, : lengths.shape[1]], axis=1)
 
     energy_plus_x, energy_minus_x, energy_plus_y, energy_minus_y = [float(value) for value in energies[:4]]
     surface_delta_x = energy_plus_x - energy_minus_x
@@ -3576,6 +4040,180 @@ def _build_flynn_euler_lookup(
     return euler_lookup
 
 
+def _dense_seed_unode_vector_section(
+    mesh_state: dict[str, Any],
+    section_name: str,
+    *,
+    component_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    seed_unodes = mesh_state.get("_runtime_seed_unodes")
+    seed_sections = mesh_state.get("_runtime_seed_unode_sections")
+    if not isinstance(seed_unodes, dict) or not isinstance(seed_sections, dict):
+        return None
+    section_values = seed_sections.get("values", {}).get(str(section_name))
+    if section_values is None:
+        return None
+    positions = np.asarray(seed_unodes.get("positions", ()), dtype=np.float64)
+    grid_indices = np.asarray(seed_unodes.get("grid_indices", ()), dtype=np.int32)
+    values = np.asarray(section_values, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[0] == 0:
+        return None
+    if grid_indices.ndim != 2 or grid_indices.shape[0] != positions.shape[0]:
+        return None
+    if values.ndim != 2 or values.shape[0] != positions.shape[0] or values.shape[1] < int(component_count):
+        return None
+    return (
+        positions,
+        grid_indices,
+        np.asarray(values[:, : int(component_count)], dtype=np.float64),
+    )
+
+
+def _seed_projection_signature(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    nodes_np = np.asarray(nodes, dtype=np.float64)
+    digest.update(nodes_np.shape[0].to_bytes(8, byteorder="little", signed=False))
+    digest.update(nodes_np.tobytes())
+    digest.update(len(flynns).to_bytes(8, byteorder="little", signed=False))
+    for flynn in flynns:
+        digest.update(int(flynn["flynn_id"]).to_bytes(8, byteorder="little", signed=True))
+        digest.update(int(flynn["label"]).to_bytes(8, byteorder="little", signed=True))
+        node_ids = tuple(int(node_id) for node_id in flynn["node_ids"])
+        digest.update(len(node_ids).to_bytes(8, byteorder="little", signed=False))
+        for node_id in node_ids:
+            digest.update(int(node_id).to_bytes(8, byteorder="little", signed=True))
+    return digest.hexdigest()
+
+
+def _cached_current_seed_projection(
+    mesh_state: dict[str, Any],
+    *,
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    seed_unodes: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    projection_signature = _seed_projection_signature(nodes, flynns)
+    cached_projection = mesh_state.get("_runtime_seed_projection_cache")
+    if (
+        isinstance(cached_projection, dict)
+        and str(cached_projection.get("signature", "")) == projection_signature
+    ):
+        label_grid = np.asarray(cached_projection.get("label_grid"), dtype=np.int32)
+        sample_labels = np.asarray(cached_projection.get("sample_labels"), dtype=np.int32)
+        if (
+            label_grid.shape == tuple(int(value) for value in seed_unodes["grid_shape"])
+            and sample_labels.shape[0] == np.asarray(seed_unodes["positions"], dtype=np.float64).shape[0]
+        ):
+            return label_grid, sample_labels
+
+    current_mesh_state = {
+        "nodes": [
+            {"x": float(xy[0]), "y": float(xy[1])}
+            for xy in np.asarray(nodes, dtype=np.float64)
+        ],
+        "flynns": [
+            {
+                **{key: value for key, value in flynn.items() if key != "node_ids"},
+                "node_ids": [int(node_id) for node_id in flynn["node_ids"]],
+            }
+            for flynn in flynns
+        ],
+        "stats": {
+            "grid_shape": [
+                int(seed_unodes["grid_shape"][0]),
+                int(seed_unodes["grid_shape"][1]),
+            ]
+        },
+    }
+    label_grid, _ = assign_seed_unodes_from_mesh(current_mesh_state, seed_unodes)
+    grid_indices = np.asarray(seed_unodes["grid_indices"], dtype=np.int32)
+    sample_labels = np.asarray(label_grid[grid_indices[:, 0], grid_indices[:, 1]], dtype=np.int32)
+    mesh_state["_runtime_seed_projection_cache"] = {
+        "signature": projection_signature,
+        "label_grid": np.asarray(label_grid, dtype=np.int32),
+        "sample_labels": np.asarray(sample_labels, dtype=np.int32),
+    }
+    return np.asarray(label_grid, dtype=np.int32), np.asarray(sample_labels, dtype=np.int32)
+
+
+def _build_flynn_unode_euler_lookup(
+    mesh_state: dict[str, Any],
+    flynns: list[dict[str, Any]],
+    *,
+    nodes: np.ndarray | None = None,
+) -> dict[str, Any] | None:
+    vector_payload = _dense_seed_unode_vector_section(
+        mesh_state,
+        "U_EULER_3",
+        component_count=3,
+    )
+    seed_unodes = mesh_state.get("_runtime_seed_unodes")
+    if vector_payload is None or not isinstance(seed_unodes, dict):
+        return None
+    positions, grid_indices, values = vector_payload
+    if positions.shape[0] == 0:
+        return None
+    current_nodes = (
+        np.asarray(nodes, dtype=np.float64)
+        if nodes is not None
+        else np.asarray(
+            [
+                (float(node["x"]), float(node["y"]))
+                for node in mesh_state.get("nodes", [])
+            ],
+            dtype=np.float64,
+        )
+    )
+    _label_grid, sample_labels = _cached_current_seed_projection(
+        mesh_state,
+        nodes=current_nodes,
+        flynns=flynns,
+        seed_unodes=seed_unodes,
+    )
+
+    by_flynn: dict[int, dict[str, np.ndarray]] = {}
+    for flynn in flynns:
+        flynn_id = int(flynn["flynn_id"])
+        label = int(flynn["label"])
+        mask = sample_labels == label
+        by_flynn[flynn_id] = {
+            "positions": np.asarray(positions[mask], dtype=np.float64),
+            "eulers": np.asarray(values[mask], dtype=np.float64),
+        }
+
+    runtime_elle_options = mesh_state.get("_runtime_elle_options")
+    return {
+        "by_flynn": by_flynn,
+        "all_positions": np.asarray(positions, dtype=np.float64),
+        "all_eulers": np.asarray(values, dtype=np.float64),
+        "search_roi": float(_legacy_fs_roi(seed_unodes, runtime_elle_options, factor=5)),
+    }
+
+
+def _nearest_unode_euler_within_roi(
+    midpoint_xy: np.ndarray,
+    positions: np.ndarray,
+    eulers: np.ndarray,
+    *,
+    roi: float,
+) -> tuple[float, float, float] | None:
+    positions = np.asarray(positions, dtype=np.float64)
+    eulers = np.asarray(eulers, dtype=np.float64)
+    if positions.ndim != 2 or eulers.ndim != 2 or positions.shape[0] == 0 or eulers.shape[0] != positions.shape[0]:
+        return None
+    deltas = _periodic_relative(positions, np.asarray(midpoint_xy, dtype=np.float64)[None, :])
+    distances = np.linalg.norm(deltas, axis=1)
+    candidate_indices = np.flatnonzero(distances < float(roi))
+    if candidate_indices.size == 0:
+        return None
+    nearest_index = int(candidate_indices[int(np.argmin(distances[candidate_indices]))])
+    values = np.asarray(eulers[nearest_index], dtype=np.float64)
+    return (float(values[0]), float(values[1]), float(values[2]))
+
+
 def _build_edge_mobility_lookup(
     mesh_state: dict[str, Any],
     flynns: list[dict[str, Any]],
@@ -3583,17 +4221,35 @@ def _build_edge_mobility_lookup(
     *,
     phase_db_path: str | None,
     temperature_c: float,
+    phase_db: Any | None = None,
+    phase_lookup: dict[int, int] | None = None,
+    nodes: np.ndarray | None = None,
+    euler_lookup: dict[int, tuple[float, float, float]] | None = None,
 ) -> dict[tuple[int, int], float]:
     if not edge_map:
         return {}
 
-    phase_db = load_phase_boundary_db(phase_db_path)
-    phase_lookup = _build_flynn_phase_lookup(
-        mesh_state,
-        flynns,
-        default_phase=int(phase_db.first_phase),
-    )
-    euler_lookup = _build_flynn_euler_lookup(mesh_state, flynns)
+    if phase_db is None:
+        phase_db = load_phase_boundary_db(phase_db_path)
+    if phase_lookup is None:
+        phase_lookup = _build_flynn_phase_lookup(
+            mesh_state,
+            flynns,
+            default_phase=int(phase_db.first_phase),
+        )
+    if euler_lookup is None:
+        euler_lookup = _build_flynn_euler_lookup(mesh_state, flynns)
+    if nodes is None:
+        nodes = np.asarray(
+            [
+                (float(node["x"]), float(node["y"]))
+                for node in mesh_state.get("nodes", [])
+            ],
+            dtype=np.float64,
+        )
+    else:
+        nodes = np.asarray(nodes, dtype=np.float64)
+    unode_euler_lookup = _build_flynn_unode_euler_lookup(mesh_state, flynns, nodes=nodes)
 
     edge_mobility_lookup: dict[tuple[int, int], float] = {}
     for edge, entries in edge_map.items():
@@ -3604,8 +4260,49 @@ def _build_edge_mobility_lookup(
         phase_b = int(phase_lookup.get(adjacent_flynns[-1], phase_a))
         misorientation_degrees: float | None = None
         if len(adjacent_flynns) >= 2:
-            euler_a = euler_lookup.get(adjacent_flynns[0])
-            euler_b = euler_lookup.get(adjacent_flynns[1])
+            euler_a = None
+            euler_b = None
+            if (
+                unode_euler_lookup is not None
+                and nodes.ndim == 2
+                and nodes.shape[0] > max(int(edge[0]), int(edge[1]))
+            ):
+                midpoint_xy = _periodic_midpoint(
+                    np.asarray(nodes[int(edge[0])], dtype=np.float64),
+                    np.asarray(nodes[int(edge[1])], dtype=np.float64),
+                )
+                search_roi = float(unode_euler_lookup.get("search_roi", 0.0))
+                by_flynn_lookup = unode_euler_lookup.get("by_flynn", {})
+                all_positions = np.asarray(
+                    unode_euler_lookup.get("all_positions", np.zeros((0, 2), dtype=np.float64)),
+                    dtype=np.float64,
+                )
+                all_eulers = np.asarray(
+                    unode_euler_lookup.get("all_eulers", np.zeros((0, 3), dtype=np.float64)),
+                    dtype=np.float64,
+                )
+                for flynn_index, flynn_id in enumerate(adjacent_flynns[:2]):
+                    flynn_entry = by_flynn_lookup.get(int(flynn_id), {})
+                    current_euler = _nearest_unode_euler_within_roi(
+                        midpoint_xy,
+                        np.asarray(flynn_entry.get("positions", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64),
+                        np.asarray(flynn_entry.get("eulers", np.zeros((0, 3), dtype=np.float64)), dtype=np.float64),
+                        roi=search_roi,
+                    )
+                    if current_euler is None:
+                        current_euler = _nearest_unode_euler_within_roi(
+                            midpoint_xy,
+                            all_positions,
+                            all_eulers,
+                            roi=search_roi,
+                        )
+                    if flynn_index == 0:
+                        euler_a = current_euler
+                    else:
+                        euler_b = current_euler
+            if euler_a is None or euler_b is None:
+                euler_a = euler_lookup.get(adjacent_flynns[0])
+                euler_b = euler_lookup.get(adjacent_flynns[1])
             if euler_a is not None and euler_b is not None:
                 misorientation_degrees = caxis_misorientation_degrees(euler_a, euler_b)
         edge_mobility_lookup[tuple(sorted((int(edge[0]), int(edge[1]))))] = boundary_segment_mobility(
@@ -3616,6 +4313,44 @@ def _build_edge_mobility_lookup(
             misorientation_degrees=misorientation_degrees,
         )
     return edge_mobility_lookup
+
+
+def _build_edge_boundary_energy_lookup(
+    mesh_state: dict[str, Any],
+    flynns: list[dict[str, Any]],
+    edge_map: dict[tuple[int, int], list[tuple[int, int]]],
+    *,
+    phase_db_path: str | None,
+    default_boundary_energy: float,
+    phase_db: Any | None = None,
+    phase_lookup: dict[int, int] | None = None,
+) -> dict[tuple[int, int], float]:
+    if not edge_map:
+        return {}
+
+    if phase_db is None:
+        phase_db = load_phase_boundary_db(phase_db_path)
+    if phase_lookup is None:
+        phase_lookup = _build_flynn_phase_lookup(
+            mesh_state,
+            flynns,
+            default_phase=int(phase_db.first_phase),
+        )
+
+    edge_boundary_energy_lookup: dict[tuple[int, int], float] = {}
+    for edge, entries in edge_map.items():
+        adjacent_flynns = [int(flynns[int(flynn_index)]["flynn_id"]) for flynn_index, _ in entries]
+        if not adjacent_flynns:
+            continue
+        phase_a = int(phase_lookup.get(adjacent_flynns[0], phase_db.first_phase))
+        phase_b = int(phase_lookup.get(adjacent_flynns[-1], phase_a))
+        edge_boundary_energy_lookup[tuple(sorted((int(edge[0]), int(edge[1]))))] = boundary_segment_energy(
+            phase_db,
+            phase_a,
+            phase_b,
+            default_energy=float(default_boundary_energy),
+        )
+    return edge_boundary_energy_lookup
 
 
 def _dense_seed_unode_scalar_field(
@@ -3674,6 +4409,36 @@ def _label_density_index(
             "positions": np.asarray(sample_positions[point_mask], dtype=np.float64),
             "densities": np.asarray(sample_densities[point_mask], dtype=np.float64),
             "mean_density": float(np.mean(densities)),
+        }
+    return index
+
+
+def _flynn_density_index(
+    label_grid: np.ndarray,
+    density_grid: np.ndarray,
+    density_mask: np.ndarray,
+    seed_unodes: dict[str, Any],
+    flynns: list[dict[str, Any]],
+) -> dict[int, dict[str, np.ndarray | float]]:
+    index: dict[int, dict[str, np.ndarray | float]] = {}
+    sample_positions = np.asarray(seed_unodes["positions"], dtype=np.float64)
+    sample_grid_indices = np.asarray(seed_unodes["grid_indices"], dtype=np.int32)
+    sample_valid = np.asarray(
+        density_mask[sample_grid_indices[:, 0], sample_grid_indices[:, 1]],
+        dtype=bool,
+    )
+    sample_labels = np.asarray(label_grid[sample_grid_indices[:, 0], sample_grid_indices[:, 1]], dtype=np.int32)
+    sample_densities = np.asarray(density_grid[sample_grid_indices[:, 0], sample_grid_indices[:, 1]], dtype=np.float64)
+
+    for flynn in flynns:
+        flynn_id = int(flynn["flynn_id"])
+        label = int(flynn["label"])
+        point_mask = sample_valid & (sample_labels == label)
+        densities = np.asarray(sample_densities[point_mask], dtype=np.float64)
+        index[int(flynn_id)] = {
+            "positions": np.asarray(sample_positions[point_mask], dtype=np.float64),
+            "densities": densities,
+            "mean_density": float(np.mean(densities)) if densities.size else 0.0,
         }
     return index
 
@@ -3774,6 +4539,10 @@ def _trial_swept_area(
         elif edge_cross < -1.0e-12:
             negative_side.append(np.asarray(neighbor_point, dtype=np.float64))
 
+    # Old ELLE unions the swept triangles with `gpcclip`. For this local
+    # geometry each swept triangle shares the old/new node segment, so the
+    # exact union reduces to the convex hull of the neighbors on each side of
+    # that segment.
     area = 0.0
     for side_points in (positive_side, negative_side):
         if not side_points:
@@ -3783,11 +4552,11 @@ def _trial_swept_area(
     return float(area)
 
 
-def _stored_energy_density_roi(seed_unodes: dict[str, Any]) -> float:
-    sample_count = len(seed_unodes.get("positions", ()))
-    if sample_count <= 0:
-        return 0.0
-    return float(3.0 * np.sqrt(1.0 / (float(sample_count) * np.pi)))
+def _stored_energy_density_roi(
+    seed_unodes: dict[str, Any],
+    runtime_elle_options: dict[str, Any] | None = None,
+) -> float:
+    return _legacy_fs_roi(seed_unodes, runtime_elle_options, factor=3)
 
 
 def _stored_energy_dummy_density() -> float:
@@ -3857,6 +4626,42 @@ def _roi_weighted_label_density(
     return float(dummy_density)
 
 
+def _roi_weighted_flynn_density(
+    trial_xy: np.ndarray,
+    target_flynn_id: int,
+    flynn_density_index: dict[int, dict[str, np.ndarray | float]],
+    *,
+    roi: float,
+    dummy_density: float,
+    all_positions: np.ndarray | None = None,
+    all_densities: np.ndarray | None = None,
+) -> float:
+    entry = flynn_density_index.get(int(target_flynn_id))
+    if entry:
+        positions = entry.get("positions", np.zeros((0, 2), dtype=np.float64))
+        densities = entry.get("densities", np.zeros((0,), dtype=np.float64))
+        if positions.size > 0 and densities.size > 0:
+            density = _roi_weighted_density(
+                trial_xy,
+                positions,
+                densities,
+                roi=roi,
+            )
+            if density is not None:
+                return float(density)
+            return float(dummy_density)
+    if all_positions is not None and all_densities is not None:
+        density = _roi_weighted_density(
+            trial_xy,
+            np.asarray(all_positions, dtype=np.float64),
+            np.asarray(all_densities, dtype=np.float64),
+            roi=roi,
+        )
+        if density is not None:
+            return float(density)
+    return float(dummy_density)
+
+
 def _fallback_incident_stored_energy(
     area: float,
     incident_flynn_ids: list[int],
@@ -3877,6 +4682,90 @@ def _fallback_incident_stored_energy(
     if density_energy <= 0.0:
         return 0.0
     return float(dummy_density) * float(area) * float(density_energy)
+
+
+def _legacy_trial_stored_energy(
+    node_id: int,
+    node_xy: np.ndarray,
+    trial_xy: np.ndarray,
+    neighbor_points: np.ndarray,
+    nodes: np.ndarray,
+    incident_flynn_ids: list[int],
+    incident_flynns: list[dict[str, Any]],
+    stored_energy_context: dict[str, Any],
+    *,
+    incident_metadata: dict[str, Any] | None = None,
+) -> float:
+    if not incident_flynn_ids or not incident_flynns:
+        return 0.0
+
+    area = _trial_swept_area(node_xy, trial_xy, neighbor_points)
+    if float(area) <= 0.0:
+        return 0.0
+
+    phase_db = stored_energy_context["phase_db"]
+    phase_lookup = stored_energy_context["phase_lookup"]
+    if incident_metadata is None:
+        incident_phase_ids = tuple(
+            int(phase_lookup.get(int(flynn_id), phase_db.first_phase))
+            for flynn_id in incident_flynn_ids
+        )
+        mixed_phases = len(set(incident_phase_ids)) > 1
+        fallback_stored_energy = max(
+            (
+                float(phase_property.stored_energy)
+                for phase_id in incident_phase_ids
+                if (phase_property := phase_db.phase_properties.get(int(phase_id))) is not None
+            ),
+            default=0.0,
+        )
+    else:
+        mixed_phases = bool(incident_metadata.get("mixed_phases", False))
+        fallback_stored_energy = float(incident_metadata.get("fallback_stored_energy", 0.0))
+    flynn_density_index = stored_energy_context["flynn_density_index"]
+    density_roi = float(stored_energy_context["density_roi"])
+    all_density_positions = stored_energy_context["all_density_positions"]
+    all_density_values = stored_energy_context["all_density_values"]
+    dummy_density = float(stored_energy_context.get("dummy_density", _stored_energy_dummy_density()))
+
+    target_flynn = _trial_target_flynn(
+        trial_xy,
+        nodes,
+        incident_flynns,
+        node_xy=node_xy,
+        neighbor_points=neighbor_points,
+    )
+    if target_flynn is None:
+        if fallback_stored_energy <= 0.0:
+            return 0.0
+        return float(dummy_density) * float(area) * float(fallback_stored_energy)
+
+    target_flynn_id = int(target_flynn["flynn_id"])
+    target_phase = int(phase_lookup.get(target_flynn_id, phase_db.first_phase))
+    phase_property = phase_db.phase_properties.get(target_phase)
+    if phase_property is None:
+        return 0.0
+    if float(phase_property.stored_energy) <= 0.0:
+        return 0.0
+    if mixed_phases:
+        scale = float(phase_property.disbondscale)
+        if scale <= 0.0:
+            return 0.0
+    else:
+        if float(phase_property.disscale) <= 0.0:
+            return 0.0
+        scale = 1.0
+
+    density = _roi_weighted_flynn_density(
+        trial_xy,
+        target_flynn_id,
+        flynn_density_index,
+        roi=density_roi,
+        dummy_density=dummy_density,
+        all_positions=all_density_positions,
+        all_densities=all_density_values,
+    )
+    return float(density) * float(area) * float(phase_property.stored_energy) * scale
 
 
 def _trial_flynn_area_change(
@@ -4049,22 +4938,13 @@ def _build_stored_energy_context(
     sample_valid = density_mask[sample_grid_indices[:, 0], sample_grid_indices[:, 1]]
     sample_densities = density_grid[sample_grid_indices[:, 0], sample_grid_indices[:, 1]]
     grid_shape = tuple(int(value) for value in seed_unodes["grid_shape"])
-    current_mesh_state = {
-        "nodes": [
-            {"x": float(xy[0]), "y": float(xy[1])}
-            for xy in np.asarray(nodes, dtype=np.float64)
-        ],
-        "flynns": [
-            {
-                **{key: value for key, value in flynn.items() if key != "node_ids"},
-                "node_ids": [int(node_id) for node_id in flynn["node_ids"]],
-            }
-            for flynn in flynns
-        ],
-        "stats": {"grid_shape": [int(grid_shape[0]), int(grid_shape[1])]},
-    }
-    label_grid, _ = assign_seed_unodes_from_mesh(current_mesh_state, seed_unodes)
-    label_density_index = _label_density_index(label_grid, density_grid, density_mask, seed_unodes)
+    label_grid, _sample_labels = _cached_current_seed_projection(
+        mesh_state,
+        nodes=np.asarray(nodes, dtype=np.float64),
+        flynns=flynns,
+        seed_unodes=seed_unodes,
+    )
+    flynn_density_index = _flynn_density_index(label_grid, density_grid, density_mask, seed_unodes, flynns)
     phase_db = load_phase_boundary_db(
         phase_db_path if phase_db_path is not None else mesh_state.get("stats", {}).get("mesh_phase_db_path")
     )
@@ -4077,10 +4957,13 @@ def _build_stored_energy_context(
         "seed_unodes": seed_unodes,
         "density_grid": density_grid,
         "density_mask": density_mask,
-        "label_density_index": label_density_index,
+        "flynn_density_index": flynn_density_index,
         "all_density_positions": np.asarray(sample_positions[sample_valid], dtype=np.float64),
         "all_density_values": np.asarray(sample_densities[sample_valid], dtype=np.float64),
-        "density_roi": _stored_energy_density_roi(seed_unodes),
+        "density_roi": _stored_energy_density_roi(
+            seed_unodes,
+            mesh_state.get("_runtime_elle_options"),
+        ),
         "dummy_density": _stored_energy_dummy_density(),
         "phase_db": phase_db,
         "phase_lookup": phase_lookup,
@@ -4122,25 +5005,27 @@ def _stored_energy_force_from_trial_positions(
     if not incident_flynns:
         return np.zeros(2, dtype=np.float64)
 
+    cluster_area_context = stored_energy_context.get("cluster_area_context")
     phase_db = stored_energy_context["phase_db"]
     phase_lookup = stored_energy_context["phase_lookup"]
-    mixed_phases = len({int(phase_lookup.get(int(flynn_id), phase_db.first_phase)) for flynn_id in incident_flynn_ids}) > 1
-    label_density_index = stored_energy_context["label_density_index"]
-    density_roi = float(stored_energy_context.get("density_roi", 0.0))
-    all_density_positions = np.asarray(
-        stored_energy_context.get("all_density_positions", np.zeros((0, 2), dtype=np.float64)),
-        dtype=np.float64,
+    incident_phase_ids = tuple(
+        int(phase_lookup.get(int(flynn_id), phase_db.first_phase))
+        for flynn_id in incident_flynn_ids
     )
-    all_density_values = np.asarray(
-        stored_energy_context.get("all_density_values", np.zeros((0,), dtype=np.float64)),
-        dtype=np.float64,
-    )
-    dummy_density = float(stored_energy_context.get("dummy_density", _stored_energy_dummy_density()))
-    cluster_area_context = stored_energy_context.get("cluster_area_context")
+    incident_metadata = {
+        "mixed_phases": len(set(incident_phase_ids)) > 1,
+        "fallback_stored_energy": max(
+            (
+                float(phase_property.stored_energy)
+                for phase_id in incident_phase_ids
+                if (phase_property := phase_db.phase_properties.get(int(phase_id))) is not None
+            ),
+            default=0.0,
+        ),
+    }
 
     stored_energies: list[float] = []
     for trial_xy in np.asarray(trial_positions, dtype=np.float64):
-        area = _trial_swept_area(node_xy, trial_xy, neighbor_points)
         cluster_energy = _trial_cluster_area_energy(
             int(node_id),
             trial_xy,
@@ -4149,47 +5034,19 @@ def _stored_energy_force_from_trial_positions(
             incident_flynn_ids,
             cluster_area_context,
         )
-        target_flynn = _trial_target_flynn(
-            trial_xy,
-            nodes,
-            incident_flynns,
-            node_xy=node_xy,
-            neighbor_points=neighbor_points,
-        )
-        if target_flynn is None:
-            stored_energies.append(
-                float(cluster_energy)
-                + _fallback_incident_stored_energy(
-                    area,
-                    incident_flynn_ids,
-                    phase_lookup,
-                    phase_db,
-                    dummy_density=dummy_density,
-                )
-            )
-            continue
-        target_phase = int(phase_lookup.get(int(target_flynn["flynn_id"]), phase_db.first_phase))
-        phase_property = phase_db.phase_properties.get(target_phase)
-        if phase_property is None:
-            stored_energies.append(float(cluster_energy))
-            continue
-        scale = float(phase_property.disbondscale if mixed_phases else phase_property.disscale)
-        if scale <= 0.0 or float(phase_property.stored_energy) <= 0.0:
-            stored_energies.append(float(cluster_energy))
-            continue
-        target_label = int(target_flynn["label"])
-        density = _roi_weighted_label_density(
-            trial_xy,
-            target_label,
-            label_density_index,
-            roi=density_roi,
-            dummy_density=dummy_density,
-            all_positions=all_density_positions,
-            all_densities=all_density_values,
-        )
         stored_energies.append(
             float(cluster_energy)
-            + float(density) * float(area) * float(phase_property.stored_energy) * scale
+            + _legacy_trial_stored_energy(
+                int(node_id),
+                node_xy,
+                trial_xy,
+                neighbor_points,
+                nodes,
+                incident_flynn_ids,
+                incident_flynns,
+                stored_energy_context,
+                incident_metadata=incident_metadata,
+            )
         )
 
     if len(stored_energies) < 4:
@@ -4289,6 +5146,7 @@ def _move_node_elle_surface(
     *,
     flynns: list[dict[str, Any]] | None = None,
     boundary_energy: float,
+    segment_boundary_energies: list[float] | tuple[float, ...] | np.ndarray | None = None,
     use_diagonal_trials: bool = False,
     unit_length: float = 1.0,
     segment_mobilities: list[float] | tuple[float, ...] | np.ndarray | None = None,
@@ -4307,6 +5165,7 @@ def _move_node_elle_surface(
         flynns=flynns,
         switch_distance=switch_distance,
         boundary_energy=boundary_energy,
+        segment_boundary_energies=segment_boundary_energies,
         use_diagonal_trials=use_diagonal_trials,
         neighbor_points=neighbor_points,
         stored_energy_context=stored_energy_context,
@@ -4564,6 +5423,140 @@ def _find_exclusive_flynn(
     return None
 
 
+def _legacy_triple_switch_context(
+    flynns: list[dict[str, Any]],
+    node_a: int,
+    node_b: int,
+    *,
+    edge_map: dict[tuple[int, int], list[tuple[int, int]]] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if edge_map is None:
+        edge_map = _edge_map(flynns)
+
+    shared_entries = edge_map.get(tuple(sorted((int(node_a), int(node_b)))))
+    if shared_entries is None:
+        return None, "missing_shared_edge"
+    shared_indices = sorted({int(flynn_index) for flynn_index, _ in shared_entries})
+    if len(shared_indices) != 2:
+        return None, "shared_edge_not_two_flynns"
+
+    shared_contexts: list[dict[str, int]] = []
+    for flynn_index in shared_indices:
+        context = _shared_edge_context([int(node_id) for node_id in flynns[flynn_index]["node_ids"]], node_a, node_b)
+        if context is None:
+            return None, "missing_shared_context"
+        shared_contexts.append(context)
+
+    exclusive_a_index = _find_exclusive_flynn(
+        flynns,
+        int(node_a),
+        (shared_contexts[0]["a_neighbor"], shared_contexts[1]["a_neighbor"]),
+        set(shared_indices),
+    )
+    exclusive_b_index = _find_exclusive_flynn(
+        flynns,
+        int(node_b),
+        (shared_contexts[0]["b_neighbor"], shared_contexts[1]["b_neighbor"]),
+        set(shared_indices),
+    )
+    if exclusive_a_index is None or exclusive_b_index is None:
+        return None, "missing_exclusive_flynn"
+
+    involved_indices = {int(exclusive_a_index), int(exclusive_b_index), *shared_indices}
+    if len(involved_indices) != 4:
+        return None, "not_four_involved_flynns"
+
+    legacy_switch_flynn_indices = {
+        "full_id_0": int(exclusive_a_index),
+        "full_id_1": int(shared_indices[0]),
+        "full_id_2": int(exclusive_b_index),
+        "full_id_3": int(shared_indices[1]),
+    }
+    legacy_switch_flynn_ids = {
+        key: int(flynns[int(index)]["flynn_id"]) for key, index in legacy_switch_flynn_indices.items()
+    }
+
+    return {
+        "shared_indices": [int(index) for index in shared_indices],
+        "shared_contexts": [
+            {
+                "a_neighbor": int(context["a_neighbor"]),
+                "b_neighbor": int(context["b_neighbor"]),
+            }
+            for context in shared_contexts
+        ],
+        "exclusive_a_index": int(exclusive_a_index),
+        "exclusive_b_index": int(exclusive_b_index),
+        "involved_indices": {int(index) for index in involved_indices},
+        "legacy_switch_neighbors": {
+            "node3": int(shared_contexts[0]["a_neighbor"]),
+            "node4": int(shared_contexts[1]["a_neighbor"]),
+            "node5": int(shared_contexts[0]["b_neighbor"]),
+            "node6": int(shared_contexts[1]["b_neighbor"]),
+        },
+        "legacy_switch_flynn_indices": dict(legacy_switch_flynn_indices),
+        "legacy_switch_flynn_ids": dict(legacy_switch_flynn_ids),
+    }, None
+
+
+def _legacy_rewrite_triple_switch_polygons(
+    flynns: list[dict[str, Any]],
+    node_a: int,
+    node_b: int,
+    *,
+    legacy_context: dict[str, Any],
+    variant_name: str,
+) -> tuple[dict[int, list[int]] | None, dict[str, Any] | None, str | None]:
+    node3 = int(legacy_context["legacy_switch_neighbors"]["node3"])
+    node4 = int(legacy_context["legacy_switch_neighbors"]["node4"])
+    node5 = int(legacy_context["legacy_switch_neighbors"]["node5"])
+    node6 = int(legacy_context["legacy_switch_neighbors"]["node6"])
+
+    full_id_0 = int(legacy_context["legacy_switch_flynn_indices"]["full_id_0"])
+    full_id_1 = int(legacy_context["legacy_switch_flynn_indices"]["full_id_1"])
+    full_id_2 = int(legacy_context["legacy_switch_flynn_indices"]["full_id_2"])
+    full_id_3 = int(legacy_context["legacy_switch_flynn_indices"]["full_id_3"])
+
+    original_node_ids = {
+        int(flynn_index): [int(node_id) for node_id in flynns[int(flynn_index)]["node_ids"]]
+        for flynn_index in (full_id_0, full_id_1, full_id_2, full_id_3)
+    }
+
+    if str(variant_name) == "switch_triple_a0b1":
+        rewritten = {
+            full_id_1: _replace_shared_edge_keep_a(original_node_ids[full_id_1], node3, node_a, node_b, node5),
+            full_id_3: _replace_shared_edge_keep_b(original_node_ids[full_id_3], node4, node_a, node_b, node6),
+            full_id_0: _rewrite_exclusive_keep_a(original_node_ids[full_id_0], node3, node_a, node4, node_b),
+            full_id_2: _rewrite_exclusive_keep_b(original_node_ids[full_id_2], node5, node_b, node6, node_a),
+        }
+        new_neighbors = {
+            "node_a": int(node5),
+            "node_b": int(node4),
+        }
+    elif str(variant_name) == "switch_triple_a1b0":
+        rewritten = {
+            full_id_3: _replace_shared_edge_keep_a(original_node_ids[full_id_3], node4, node_a, node_b, node6),
+            full_id_1: _replace_shared_edge_keep_b(original_node_ids[full_id_1], node3, node_a, node_b, node5),
+            full_id_0: _rewrite_exclusive_keep_a(original_node_ids[full_id_0], node4, node_a, node3, node_b),
+            full_id_2: _rewrite_exclusive_keep_b(original_node_ids[full_id_2], node6, node_b, node5, node_a),
+        }
+        new_neighbors = {
+            "node_a": int(node6),
+            "node_b": int(node3),
+        }
+    else:
+        return None, None, "invalid_switch_variant"
+
+    if any(node_ids is None or not _polygon_is_valid(node_ids) for node_ids in rewritten.values()):
+        return None, None, "invalid_polygon"
+
+    return (
+        {int(flynn_index): [int(node_id) for node_id in node_ids] for flynn_index, node_ids in rewritten.items()},
+        {"node_a": int(new_neighbors["node_a"]), "node_b": int(new_neighbors["node_b"])},
+        None,
+    )
+
+
 def _segments_intersect(
     point_a1: np.ndarray,
     point_a2: np.ndarray,
@@ -4730,6 +5723,66 @@ def _affected_flynns_are_valid(
     return True, None
 
 
+def _find_flynn_index_by_id(
+    flynns: list[dict[str, Any]],
+    flynn_id: int,
+) -> int | None:
+    target_id = int(flynn_id)
+    for flynn_index, flynn in enumerate(flynns):
+        if int(flynn["flynn_id"]) == target_id:
+            return int(flynn_index)
+    return None
+
+
+def _legacy_validate_triple_switch_result(
+    flynns: list[dict[str, Any]],
+    nodes: np.ndarray,
+    *,
+    legacy_context: dict[str, Any],
+    cleanup_performed: bool,
+    min_area: float,
+    geometry_cache: dict[int, dict[str, float | bool]] | None = None,
+) -> tuple[bool, str | None, set[int]]:
+    legacy_flynn_ids = {
+        str(key): int(value) for key, value in dict(legacy_context["legacy_switch_flynn_ids"]).items()
+    }
+    current_indices: dict[str, int] = {}
+    affected_indices: set[int] = set()
+    for role, flynn_id in legacy_flynn_ids.items():
+        flynn_index = _find_flynn_index_by_id(flynns, int(flynn_id))
+        if flynn_index is None:
+            continue
+        current_indices[str(role)] = int(flynn_index)
+        affected_indices.add(int(flynn_index))
+
+    if not cleanup_performed and (
+        int(legacy_flynn_ids["full_id_1"]) == int(legacy_flynn_ids["full_id_3"])
+        or int(legacy_flynn_ids["full_id_0"]) == int(legacy_flynn_ids["full_id_2"])
+    ):
+        return False, "region_wrap", affected_indices
+
+    for role in ("full_id_0", "full_id_1", "full_id_2", "full_id_3"):
+        flynn_index = current_indices.get(str(role))
+        if flynn_index is None:
+            continue
+        if geometry_cache is None:
+            metrics = _flynn_geometry_metrics([int(node_id) for node_id in flynns[flynn_index]["node_ids"]], nodes)
+        else:
+            metrics = _flynn_geometry_metrics_cached(
+                flynns,
+                nodes,
+                geometry_cache,
+                int(flynn_index),
+                require_simple=True,
+            )
+        if not bool(metrics["is_simple"]):
+            return False, f"{role}_non_simple", affected_indices
+        if float(metrics["area"]) < float(min_area):
+            return False, f"{role}_small_flynn", affected_indices
+
+    return True, None, affected_indices
+
+
 def _switch_variant_is_valid(
     nodes: np.ndarray,
     node_a: int,
@@ -4806,26 +5859,261 @@ def _trace_boundary_cycle(
     return None
 
 
-def _nudge_switched_node(
+def _legacy_find_switch_centre(
     nodes: np.ndarray,
     node_id: int,
-    anchor_neighbor: int,
-    side_neighbor_a: int,
-    side_neighbor_b: int,
-    switch_distance: float,
+    anchor_node: int,
+    neighbor_a: int,
+    neighbor_b: int,
+) -> np.ndarray:
+    anchor_xy = np.asarray(nodes[int(anchor_node)], dtype=np.float64)
+    node_xy = _plot_xy(nodes[int(node_id)], anchor_xy)
+    midpoint = (anchor_xy + node_xy) * 0.5
+    neighbor_a_xy = _plot_xy(nodes[int(neighbor_a)], anchor_xy)
+    neighbor_b_xy = _plot_xy(nodes[int(neighbor_b)], anchor_xy)
+    return np.asarray((midpoint + neighbor_a_xy + neighbor_b_xy) / 3.0, dtype=np.float64)
+
+
+def _legacy_move_node_to_centre(
+    nodes: np.ndarray,
+    node_id: int,
+    target_xy: np.ndarray,
 ) -> None:
-    origin = nodes[int(node_id)]
-    target = (
-        _plot_xy(nodes[int(anchor_neighbor)], origin)
-        + _plot_xy(nodes[int(side_neighbor_a)], origin)
-        + _plot_xy(nodes[int(side_neighbor_b)], origin)
-    ) / 3.0
-    increment = target - origin
-    norm = float(np.hypot(increment[0], increment[1]))
-    if norm <= 1e-12:
-        return
-    max_move = switch_distance * 0.25
-    nodes[int(node_id)] = (origin + increment * min(max_move / norm, 1.0)) % 1.0
+    target_xy = np.asarray(target_xy, dtype=np.float64)
+    plotted_current = _plot_xy(nodes[int(node_id)], target_xy)
+    increment = target_xy - plotted_current
+    nodes[int(node_id)] = (np.asarray(nodes[int(node_id)], dtype=np.float64) + increment) % 1.0
+
+
+def _legacy_reposition_switched_triple_nodes(
+    nodes: np.ndarray,
+    node_a: int,
+    node_b: int,
+    *,
+    legacy_context: dict[str, Any],
+) -> dict[str, list[float]]:
+    original_nodes = np.asarray(nodes, dtype=np.float64).copy()
+    node3 = int(legacy_context["legacy_switch_neighbors"]["node3"])
+    node4 = int(legacy_context["legacy_switch_neighbors"]["node4"])
+    node5 = int(legacy_context["legacy_switch_neighbors"]["node5"])
+    node6 = int(legacy_context["legacy_switch_neighbors"]["node6"])
+
+    target_a = _legacy_find_switch_centre(original_nodes, int(node_a), int(node_b), int(node3), int(node5))
+    target_b = _legacy_find_switch_centre(original_nodes, int(node_b), int(node_a), int(node4), int(node6))
+
+    _legacy_move_node_to_centre(nodes, int(node_b), target_b)
+    nodes[int(node_a)] = np.mod(target_a, 1.0)
+
+    return {
+        "node_a": [float(value) for value in np.mod(target_a, 1.0)],
+        "node_b": [float(value) for value in np.asarray(nodes[int(node_b)], dtype=np.float64)],
+    }
+
+
+def _legacy_cleanup_two_sided_after_triple_switch(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    node_a: int,
+    node_b: int,
+    *,
+    candidate_flynn_ids: set[int],
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int]:
+    if len(flynns) < 2 or not candidate_flynn_ids:
+        return nodes, flynns, [], 0
+
+    events: list[dict[str, Any]] = []
+    merged_flynns = 0
+
+    while True:
+        node_neighbors = _node_neighbors(flynns)
+        neighbor_lengths = _flynn_neighbor_lengths(flynns, nodes)
+        geometry_cache: dict[int, dict[str, float | bool]] = {}
+        candidates: list[dict[str, Any]] = []
+
+        for flynn_index, flynn in enumerate(flynns):
+            flynn_id = int(flynn["flynn_id"])
+            if flynn_id not in candidate_flynn_ids:
+                continue
+            neighbor_map = neighbor_lengths[int(flynn_index)]
+            if len(neighbor_map) != 2:
+                continue
+
+            node_ids = [int(node_id) for node_id in flynn["node_ids"]]
+            triple_nodes = sorted(
+                int(local_node_id)
+                for local_node_id in set(node_ids)
+                if len(node_neighbors.get(int(local_node_id), set())) >= 3
+            )
+            if triple_nodes != sorted([int(node_a), int(node_b)]):
+                continue
+
+            area = float(
+                _flynn_geometry_metrics_cached(
+                    flynns,
+                    nodes,
+                    geometry_cache,
+                    int(flynn_index),
+                    require_simple=False,
+                )["area"]
+            )
+            metrics = _flynn_geometry_metrics_cached(
+                flynns,
+                nodes,
+                geometry_cache,
+                int(flynn_index),
+                require_simple=True,
+            )
+            if not metrics["is_simple"]:
+                continue
+
+            neighbor_order = sorted(
+                (int(neighbor_index) for neighbor_index in neighbor_map),
+                key=lambda neighbor_index: (
+                    -float(neighbor_map[int(neighbor_index)]),
+                    -float(
+                        _flynn_geometry_metrics_cached(
+                            flynns,
+                            nodes,
+                            geometry_cache,
+                            int(neighbor_index),
+                            require_simple=False,
+                        )["area"]
+                    ),
+                    int(flynns[int(neighbor_index)]["flynn_id"]),
+                ),
+            )
+            candidates.append(
+                {
+                    "flynn_index": int(flynn_index),
+                    "flynn_id": int(flynn_id),
+                    "area": float(area),
+                    "triple_nodes": [int(node_id) for node_id in triple_nodes],
+                    "neighbor_order": [int(index) for index in neighbor_order],
+                    "neighbor_flynn_ids": [
+                        int(flynns[int(neighbor_index)]["flynn_id"]) for neighbor_index in neighbor_order
+                    ],
+                }
+            )
+
+        if not candidates:
+            break
+
+        merged_this_round = False
+        for candidate in sorted(candidates, key=lambda item: (float(item["area"]), int(item["flynn_id"]))):
+            remove_index = int(candidate["flynn_index"])
+            if remove_index >= len(flynns) or int(flynns[remove_index]["flynn_id"]) != int(candidate["flynn_id"]):
+                continue
+
+            for keep_index in candidate["neighbor_order"]:
+                if keep_index >= len(flynns):
+                    continue
+                event = _merge_flynn_into_neighbor(nodes, flynns, remove_index, keep_index)
+                if event is None:
+                    continue
+                event["area"] = float(candidate["area"])
+                event["triple_nodes"] = [int(node_id) for node_id in candidate["triple_nodes"]]
+                event["neighbor_flynn_ids"] = [int(flynn_id) for flynn_id in candidate["neighbor_flynn_ids"]]
+                event["reason"] = "legacy_post_switch_two_sided"
+                event["switched_nodes"] = [int(node_a), int(node_b)]
+                events.append(event)
+                merged_flynns += 1
+                merged_this_round = True
+                break
+
+            if merged_this_round:
+                break
+
+        if not merged_this_round:
+            break
+
+    return nodes, flynns, events, merged_flynns
+
+
+def _legacy_post_switch_topology_check(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    switched_node_id: int,
+    switch_distance: float,
+    min_node_separation: float,
+    max_node_separation: float,
+    phase_lookup: dict[int, int] | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int, int, int]:
+    events: list[dict[str, Any]] = []
+    inserted_nodes = 0
+    removed_nodes = 0
+    switched_edges = 0
+    rejected_switches = 0
+
+    if int(switched_node_id) >= len(nodes):
+        return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
+
+    _record_faithful_topology_stage(
+        events,
+        stage="post_switch_topology_check",
+        moved_node_id=int(switched_node_id),
+        node_id=int(switched_node_id),
+    )
+
+    focus_nodes = {int(switched_node_id)}
+    nodes, flynns, single_events, _deleted_single_nodes = _faithful_delete_single_j_local(
+        nodes,
+        flynns,
+        moved_node_id=int(switched_node_id),
+        focus_nodes=focus_nodes,
+    )
+    events.extend(single_events)
+
+    node_neighbors, focus_nodes = _refresh_local_focus_nodes(int(switched_node_id), focus_nodes, flynns)
+    degree = len(node_neighbors.get(int(switched_node_id), set()))
+    if degree == 2:
+        nodes, flynns, local_events, local_inserted, local_removed = _faithful_check_double_j_local(
+            nodes,
+            flynns,
+            moved_node_id=int(switched_node_id),
+            node_id=int(switched_node_id),
+            switch_distance=switch_distance,
+            min_node_separation=min_node_separation,
+            max_node_separation=max_node_separation,
+        )
+        inserted_nodes += local_inserted
+        removed_nodes += local_removed
+        events.extend(local_events)
+    elif degree == 3:
+        (
+            nodes,
+            flynns,
+            local_events,
+            local_inserted,
+            local_removed,
+            local_switched,
+            local_rejected,
+        ) = _faithful_check_triple_j_local(
+            nodes,
+            flynns,
+            moved_node_id=int(switched_node_id),
+            node_id=int(switched_node_id),
+            switch_distance=switch_distance,
+            min_node_separation=min_node_separation,
+            max_node_separation=max_node_separation,
+            phase_lookup=phase_lookup,
+            run_post_switch_topology_check=False,
+        )
+        inserted_nodes += local_inserted
+        removed_nodes += local_removed
+        switched_edges += local_switched
+        rejected_switches += local_rejected
+        events.extend(local_events)
+
+    node_neighbors, focus_nodes = _refresh_local_focus_nodes(int(switched_node_id), focus_nodes, flynns)
+    _record_faithful_topology_stage(
+        events,
+        stage="post_switch_update_topology_state",
+        moved_node_id=int(switched_node_id),
+        focus_nodes=focus_nodes,
+    )
+
+    return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
 
 
 def _switch_triple_edge(
@@ -4838,61 +6126,48 @@ def _switch_triple_edge(
     node_neighbors: dict[int, set[int]] | None = None,
     edge_map: dict[tuple[int, int], list[tuple[int, int]]] | None = None,
     geometry_cache: dict[int, dict[str, float | bool]] | None = None,
+    min_node_separation: float | None = None,
+    max_node_separation: float | None = None,
+    phase_lookup: dict[int, int] | None = None,
+    run_post_switch_topology_check: bool = True,
 ) -> tuple[bool, dict[str, Any] | None, str | None]:
     if node_neighbors is None:
         node_neighbors = _node_neighbors(flynns)
     if len(node_neighbors.get(int(node_a), set())) != 3 or len(node_neighbors.get(int(node_b), set())) != 3:
-        return False, None, None
+        return False, None, "not_triple_pair"
 
-    if edge_map is None:
-        edge_map = _edge_map(flynns)
-    shared_entries = edge_map.get(tuple(sorted((int(node_a), int(node_b)))))
-    if shared_entries is None:
-        return False, None, None
-    shared_indices = sorted({int(flynn_index) for flynn_index, _ in shared_entries})
-    if len(shared_indices) != 2:
-        return False, None, None
-
-    shared_contexts = []
-    for flynn_index in shared_indices:
-        context = _shared_edge_context([int(node_id) for node_id in flynns[flynn_index]["node_ids"]], node_a, node_b)
-        if context is None:
-            return False, None, None
-        shared_contexts.append(context)
-
-    exclusive_a_index = _find_exclusive_flynn(
+    legacy_context, context_error = _legacy_triple_switch_context(
         flynns,
-        node_a,
-        (shared_contexts[0]["a_neighbor"], shared_contexts[1]["a_neighbor"]),
-        set(shared_indices),
+        int(node_a),
+        int(node_b),
+        edge_map=edge_map,
     )
-    exclusive_b_index = _find_exclusive_flynn(
-        flynns,
-        node_b,
-        (shared_contexts[0]["b_neighbor"], shared_contexts[1]["b_neighbor"]),
-        set(shared_indices),
-    )
-    if exclusive_a_index is None or exclusive_b_index is None:
-        return False, None, None
+    if legacy_context is None:
+        return False, None, context_error
 
-    involved_indices = {int(exclusive_a_index), int(exclusive_b_index), *shared_indices}
-    if len(involved_indices) != 4:
-        return False, None, None
+    involved_indices = {int(index) for index in legacy_context["involved_indices"]}
+    legacy_switch_flynn_ids = {
+        str(key): int(value) for key, value in dict(legacy_context["legacy_switch_flynn_ids"]).items()
+    }
+    node3 = int(legacy_context["legacy_switch_neighbors"]["node3"])
+    node4 = int(legacy_context["legacy_switch_neighbors"]["node4"])
+    node5 = int(legacy_context["legacy_switch_neighbors"]["node5"])
+    node6 = int(legacy_context["legacy_switch_neighbors"]["node6"])
 
     candidates = [
         {
             "name": "switch_triple_a0b1",
-            "keep_a_shared": 0,
-            "keep_b_shared": 1,
-            "a_new_neighbor": int(shared_contexts[0]["b_neighbor"]),
-            "b_new_neighbor": int(shared_contexts[1]["a_neighbor"]),
+            "shared_keep_a": {"a_neighbor": int(node3), "b_neighbor": int(node5)},
+            "shared_keep_b": {"a_neighbor": int(node4), "b_neighbor": int(node6)},
+            "a_new_neighbor": int(node5),
+            "b_new_neighbor": int(node4),
         },
         {
             "name": "switch_triple_a1b0",
-            "keep_a_shared": 1,
-            "keep_b_shared": 0,
-            "a_new_neighbor": int(shared_contexts[1]["b_neighbor"]),
-            "b_new_neighbor": int(shared_contexts[0]["a_neighbor"]),
+            "shared_keep_a": {"a_neighbor": int(node4), "b_neighbor": int(node6)},
+            "shared_keep_b": {"a_neighbor": int(node3), "b_neighbor": int(node5)},
+            "a_new_neighbor": int(node6),
+            "b_new_neighbor": int(node3),
         },
     ]
 
@@ -4902,14 +6177,14 @@ def _switch_triple_edge(
             nodes,
             node_a,
             node_b,
-            shared_contexts[int(candidate["keep_a_shared"])],
-            shared_contexts[int(candidate["keep_b_shared"])],
+            dict(candidate["shared_keep_a"]),
+            dict(candidate["shared_keep_b"]),
         ):
             continue
         valid_candidates.append(candidate)
 
     if not valid_candidates:
-        return False, None, None
+        return False, None, "invalid_switch_variant"
 
     candidate = min(
         valid_candidates,
@@ -4917,51 +6192,24 @@ def _switch_triple_edge(
         + _edge_length(nodes, node_b, int(item["b_new_neighbor"])),
     )
 
-    original_node_ids = {
-        flynn_index: [int(node_id) for node_id in flynns[flynn_index]["node_ids"]]
-        for flynn_index in involved_indices
-    }
     original_node_positions = {
         int(node_a): nodes[int(node_a)].copy(),
         int(node_b): nodes[int(node_b)].copy(),
     }
-
-    keep_a_index = int(shared_indices[int(candidate["keep_a_shared"])])
-    keep_b_index = int(shared_indices[int(candidate["keep_b_shared"])])
-
-    rewritten = {
-        keep_a_index: _replace_shared_edge_keep_a(
-            original_node_ids[keep_a_index],
-            int(shared_contexts[int(candidate["keep_a_shared"])]["a_neighbor"]),
-            node_a,
-            node_b,
-            int(candidate["a_new_neighbor"]),
-        ),
-        keep_b_index: _replace_shared_edge_keep_b(
-            original_node_ids[keep_b_index],
-            int(candidate["b_new_neighbor"]),
-            node_a,
-            node_b,
-            int(shared_contexts[int(candidate["keep_b_shared"])]["b_neighbor"]),
-        ),
-        int(exclusive_a_index): _rewrite_exclusive_keep_a(
-            original_node_ids[int(exclusive_a_index)],
-            int(shared_contexts[int(candidate["keep_a_shared"])]["a_neighbor"]),
-            node_a,
-            int(candidate["b_new_neighbor"]),
-            node_b,
-        ),
-        int(exclusive_b_index): _rewrite_exclusive_keep_b(
-            original_node_ids[int(exclusive_b_index)],
-            int(candidate["a_new_neighbor"]),
-            node_b,
-            int(shared_contexts[int(candidate["keep_b_shared"])]["b_neighbor"]),
-            node_a,
-        ),
+    original_node_ids = {
+        int(flynn_index): [int(node_id) for node_id in flynns[int(flynn_index)]["node_ids"]]
+        for flynn_index in involved_indices
     }
 
-    if any(node_ids is None or not _polygon_is_valid(node_ids) for node_ids in rewritten.values()):
-        return False, None, "invalid_polygon"
+    rewritten, new_neighbors, rewrite_error = _legacy_rewrite_triple_switch_polygons(
+        flynns,
+        int(node_a),
+        int(node_b),
+        legacy_context=legacy_context,
+        variant_name=str(candidate["name"]),
+    )
+    if rewritten is None or new_neighbors is None:
+        return False, None, rewrite_error
 
     for flynn_index, node_ids in rewritten.items():
         flynns[int(flynn_index)]["node_ids"] = [int(node_id) for node_id in node_ids]
@@ -4972,28 +6220,71 @@ def _switch_triple_edge(
             flynns[int(flynn_index)]["node_ids"] = [int(node_id) for node_id in node_ids]
         return False, None, "bad_degree"
 
-    _nudge_switched_node(
+    nodes, flynns, post_switch_cleanup_events, post_switch_merged_flynns = _legacy_cleanup_two_sided_after_triple_switch(
         nodes,
-        node_a,
-        node_b,
-        int(shared_contexts[int(candidate["keep_a_shared"])]["a_neighbor"]),
-        int(candidate["a_new_neighbor"]),
-        switch_distance,
+        flynns,
+        int(node_a),
+        int(node_b),
+        candidate_flynn_ids={int(flynn_id) for flynn_id in legacy_switch_flynn_ids.values()},
     )
-    _nudge_switched_node(
+    legacy_switch_targets = _legacy_reposition_switched_triple_nodes(
         nodes,
-        node_b,
-        node_a,
-        int(candidate["b_new_neighbor"]),
-        int(shared_contexts[1]["b_neighbor"] if int(candidate["keep_b_shared"]) == 1 else shared_contexts[0]["b_neighbor"]),
-        switch_distance,
+        int(node_a),
+        int(node_b),
+        legacy_context=legacy_context,
     )
 
     min_flynn_area = switch_distance * switch_distance * np.sin(np.pi / 3.0) * 0.5
+    if min_node_separation is None:
+        min_node_separation = float(switch_distance)
+    if max_node_separation is None:
+        max_node_separation = float(switch_distance) * 2.2
+    local_valid, local_invalid_reason, current_affected_indices = _legacy_validate_triple_switch_result(
+        flynns,
+        nodes,
+        legacy_context=legacy_context,
+        cleanup_performed=bool(post_switch_merged_flynns or post_switch_cleanup_events),
+        min_area=float(min_flynn_area),
+        geometry_cache=geometry_cache,
+    )
+    if not local_valid:
+        for flynn_index, node_ids in original_node_ids.items():
+            flynns[int(flynn_index)]["node_ids"] = [int(node_id) for node_id in node_ids]
+        for node_id, position in original_node_positions.items():
+            nodes[int(node_id)] = position
+        return False, None, local_invalid_reason
+
+    post_switch_topology_events: list[dict[str, Any]] = []
+    post_switch_inserted_nodes = 0
+    post_switch_removed_nodes = 0
+    post_switch_switched_edges = 0
+    post_switch_rejected_switches = 0
+    if run_post_switch_topology_check:
+        (
+            nodes,
+            flynns,
+            post_switch_topology_events,
+            post_switch_inserted_nodes,
+            post_switch_removed_nodes,
+            post_switch_switched_edges,
+            post_switch_rejected_switches,
+        ) = _legacy_post_switch_topology_check(
+            nodes,
+            flynns,
+            switched_node_id=int(node_a),
+            switch_distance=switch_distance,
+            min_node_separation=float(min_node_separation),
+            max_node_separation=float(max_node_separation),
+            phase_lookup=phase_lookup,
+        )
+        node_neighbors = _node_neighbors(flynns)
+        focus_nodes = {int(node_a), *(int(node_id) for node_id in node_neighbors.get(int(node_a), set()))}
+        current_affected_indices = current_affected_indices | _local_flynn_indices(flynns, focus_nodes)
+
     valid, invalid_reason = _affected_flynns_are_valid(
         flynns,
         nodes,
-        involved_indices,
+        current_affected_indices,
         min_area=float(min_flynn_area),
         geometry_cache=geometry_cache,
     )
@@ -5007,16 +6298,44 @@ def _switch_triple_edge(
     return True, {
         "type": str(candidate["name"]),
         "edge": [int(node_a), int(node_b)],
-        "shared_flynns": [int(flynns[index]["flynn_id"]) for index in shared_indices],
-        "exclusive_flynns": [
-            int(flynns[int(exclusive_a_index)]["flynn_id"]),
-            int(flynns[int(exclusive_b_index)]["flynn_id"]),
+        "shared_flynns": [
+            int(legacy_switch_flynn_ids["full_id_1"]),
+            int(legacy_switch_flynn_ids["full_id_3"]),
         ],
+        "exclusive_flynns": [
+            int(legacy_switch_flynn_ids["full_id_0"]),
+            int(legacy_switch_flynn_ids["full_id_2"]),
+        ],
+        "legacy_switch_neighbors": dict(legacy_context["legacy_switch_neighbors"]),
+        "legacy_switch_flynns": dict(legacy_switch_flynn_ids),
+        "legacy_switch_targets": dict(legacy_switch_targets),
+        "post_switch_cleanup_events": [dict(event) for event in post_switch_cleanup_events],
+        "post_switch_merged_flynns": int(post_switch_merged_flynns),
+        "post_switch_topology_events": [dict(event) for event in post_switch_topology_events],
+        "post_switch_inserted_nodes": int(post_switch_inserted_nodes),
+        "post_switch_removed_nodes": int(post_switch_removed_nodes),
+        "post_switch_switched_edges": int(post_switch_switched_edges),
+        "post_switch_rejected_switches": int(post_switch_rejected_switches),
         "new_neighbors": {
-            "node_a": int(candidate["a_new_neighbor"]),
-            "node_b": int(candidate["b_new_neighbor"]),
+            "node_a": int(new_neighbors["node_a"]),
+            "node_b": int(new_neighbors["node_b"]),
         },
     }, None
+
+
+def _triple_switch_rejection_event(
+    *,
+    node_id: int,
+    target_neighbor: int,
+    edge_length: float,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "type": "reject_triple_switch",
+        "edge": [int(node_id), int(target_neighbor)],
+        "edge_length": float(edge_length),
+        "reason": str(reason),
+    }
 
 
 def _merge_flynn_into_neighbor(
@@ -5750,8 +7069,11 @@ def _refresh_local_focus_nodes(
     moved_node_id: int,
     focus_nodes: set[int],
     flynns: list[dict[str, Any]],
+    *,
+    node_neighbors: dict[int, set[int]] | None = None,
 ) -> tuple[dict[int, set[int]], set[int]]:
-    node_neighbors = _node_neighbors(flynns)
+    if node_neighbors is None:
+        node_neighbors = _node_neighbors(flynns)
     refreshed_focus = {int(node_id) for node_id in focus_nodes if int(node_id) in node_neighbors}
     if int(moved_node_id) in node_neighbors:
         refreshed_focus.add(int(moved_node_id))
@@ -5804,6 +7126,243 @@ def _delete_single_nodes_local(
             queue.append(int(neighbor_id))
             queued.add(int(neighbor_id))
 
+    return nodes, flynns, events, deleted
+
+
+def _record_faithful_topology_stage(
+    events: list[dict[str, Any]],
+    *,
+    stage: str,
+    moved_node_id: int,
+    focus_nodes: set[int] | None = None,
+    node_id: int | None = None,
+) -> None:
+    event: dict[str, Any] = {
+        "type": "faithful_topology_stage",
+        "stage": str(stage),
+        "moved_node_id": int(moved_node_id),
+    }
+    if focus_nodes is not None:
+        event["focus_nodes"] = [int(value) for value in sorted(int(entry) for entry in focus_nodes)]
+    if node_id is not None:
+        event["node_id"] = int(node_id)
+    events.append(event)
+
+
+def _flynn_neighbor_ids(flynns: list[dict[str, Any]]) -> list[set[int]]:
+    neighbors: list[set[int]] = [set() for _ in flynns]
+    for _edge, entries in _edge_map(flynns).items():
+        if len(entries) != 2:
+            continue
+        first_index = int(entries[0][0])
+        second_index = int(entries[1][0])
+        neighbors[first_index].add(second_index)
+        neighbors[second_index].add(first_index)
+    return neighbors
+
+
+def _two_sided_flynn_indices_for_node(
+    node_id: int,
+    flynns: list[dict[str, Any]],
+) -> list[int]:
+    neighbor_ids = _flynn_neighbor_ids(flynns)
+    incident_indices = [
+        int(flynn_index)
+        for flynn_index, flynn in enumerate(flynns)
+        if int(node_id) in {int(entry) for entry in flynn["node_ids"]}
+    ]
+    return [
+        int(flynn_index)
+        for flynn_index in incident_indices
+        if len(neighbor_ids[int(flynn_index)]) <= 2
+    ]
+
+
+def _movement_crosses_two_sided_flynn_edge(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    node_id: int,
+    previous_position: np.ndarray,
+    new_position: np.ndarray,
+) -> dict[str, Any] | None:
+    node_neighbors = _node_neighbors(flynns)
+    if len(node_neighbors.get(int(node_id), set())) != 2:
+        return None
+
+    old_xy = np.asarray(previous_position, dtype=np.float64)
+    new_xy = _plot_xy(np.asarray(new_position, dtype=np.float64), old_xy)
+    if float(np.hypot(*(new_xy - old_xy))) <= 1.0e-12:
+        return None
+
+    for flynn_index in _two_sided_flynn_indices_for_node(int(node_id), flynns):
+        flynn = flynns[int(flynn_index)]
+        node_ids = [int(entry) for entry in flynn["node_ids"]]
+        count = len(node_ids)
+        for index in range(count):
+            edge_a = int(node_ids[index])
+            edge_b = int(node_ids[(index + 1) % count])
+            if int(node_id) in {edge_a, edge_b}:
+                continue
+            edge_a_xy = _plot_xy(nodes[edge_a], old_xy)
+            edge_b_xy = _plot_xy(nodes[edge_b], old_xy)
+            if _segments_intersect(old_xy, new_xy, edge_a_xy, edge_b_xy):
+                return {
+                    "flynn_id": int(flynn.get("flynn_id", flynn.get("label", -1))),
+                    "edge": [int(edge_a), int(edge_b)],
+                }
+    return None
+
+
+def _faithful_crossings_check_local(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    moved_node_id: int,
+    focus_nodes: set[int],
+    switch_distance: float,
+    previous_position: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    events: list[dict[str, Any]] = []
+    coincident_nodes_resolved = 0
+    blocked_crossings = 0
+
+    _record_faithful_topology_stage(
+        events,
+        stage="crossings_check",
+        moved_node_id=int(moved_node_id),
+        focus_nodes=focus_nodes,
+    )
+    if len(nodes) == 0:
+        return nodes, flynns, events, coincident_nodes_resolved, blocked_crossings
+
+    if previous_position is not None and 0 <= int(moved_node_id) < len(nodes):
+        blocked = _movement_crosses_two_sided_flynn_edge(
+            nodes,
+            flynns,
+            node_id=int(moved_node_id),
+            previous_position=np.asarray(previous_position, dtype=np.float64),
+            new_position=nodes[int(moved_node_id)],
+        )
+        if blocked is not None:
+            nodes[int(moved_node_id)] = np.asarray(previous_position, dtype=np.float64) % 1.0
+            blocked_crossings += 1
+            events.append(
+                {
+                    "type": "forbid_crossing",
+                    "node_id": int(moved_node_id),
+                    "flynn_id": int(blocked["flynn_id"]),
+                    "edge": [int(value) for value in blocked["edge"]],
+                    "reason": "two_sided_flynn_edge_crossing",
+                }
+            )
+            return nodes, flynns, events, coincident_nodes_resolved, blocked_crossings
+
+        node_neighbors = _node_neighbors(flynns)
+        moved_neighbors = sorted(int(value) for value in node_neighbors.get(int(moved_node_id), set()))
+        if len(moved_neighbors) == 3 and switch_distance > 0.0:
+            triple_neighbors = [
+                int(neighbor_id)
+                for neighbor_id in moved_neighbors
+                if len(node_neighbors.get(int(neighbor_id), set())) == 3
+            ]
+            if triple_neighbors:
+                target_neighbor = min(
+                    triple_neighbors,
+                    key=lambda neighbor_id: _edge_length(nodes, int(moved_node_id), int(neighbor_id)),
+                )
+                target_length = float(_edge_length(nodes, int(moved_node_id), int(target_neighbor)))
+                if (
+                    target_length < float(switch_distance)
+                    and not _triple_switch_possible_local(
+                        int(moved_node_id),
+                        int(target_neighbor),
+                        flynns,
+                        node_neighbors=node_neighbors,
+                    )
+                ):
+                    nodes[int(moved_node_id)] = np.asarray(previous_position, dtype=np.float64) % 1.0
+                    blocked_crossings += 1
+                    events.append(
+                        {
+                            "type": "forbid_crossing",
+                            "node_id": int(moved_node_id),
+                            "neighbor_id": int(target_neighbor),
+                            "edge_length": float(target_length),
+                            "reason": "triple_switch_impossible",
+                        }
+                    )
+                    return nodes, flynns, events, coincident_nodes_resolved, blocked_crossings
+
+    if switch_distance <= 0.0 or not focus_nodes:
+        return nodes, flynns, events, coincident_nodes_resolved, blocked_crossings
+
+    increment = float(switch_distance) / 5.0
+    checked_pairs: set[tuple[int, int]] = set()
+    node_keys = {
+        int(node_id): (round(float(xy[0]), 12), round(float(xy[1]), 12))
+        for node_id, xy in enumerate(nodes)
+    }
+    for flynn_index in sorted(_local_flynn_indices(flynns, focus_nodes)):
+        flynn = flynns[int(flynn_index)]
+        duplicate_groups: dict[tuple[float, float], list[int]] = {}
+        for node_id in [int(node_id) for node_id in flynn["node_ids"]]:
+            if int(node_id) not in focus_nodes:
+                continue
+            duplicate_groups.setdefault(node_keys[int(node_id)], []).append(int(node_id))
+        for grouped_nodes in duplicate_groups.values():
+            if len(grouped_nodes) < 2:
+                continue
+            for left_index in range(len(grouped_nodes) - 1):
+                left_node = int(grouped_nodes[left_index])
+                for right_index in range(left_index + 1, len(grouped_nodes)):
+                    right_node = int(grouped_nodes[right_index])
+                    pair = tuple(sorted((left_node, right_node)))
+                    if pair in checked_pairs:
+                        continue
+                    checked_pairs.add(pair)
+                    separation = _periodic_relative(nodes[right_node], nodes[left_node])
+                    if float(np.hypot(separation[0], separation[1])) > 1.0e-12:
+                        continue
+                    origin = nodes[left_node].copy()
+                    candidate_plus = (origin + np.array([increment, increment], dtype=np.float64)) % 1.0
+                    candidate_minus = (origin - np.array([increment, increment], dtype=np.float64)) % 1.0
+                    dist_plus = float(np.hypot(*_periodic_relative(nodes[right_node], candidate_plus)))
+                    dist_minus = float(np.hypot(*_periodic_relative(nodes[right_node], candidate_minus)))
+                    nodes[left_node] = candidate_minus if dist_minus > dist_plus else candidate_plus
+                    coincident_nodes_resolved += 1
+                    events.append(
+                        {
+                            "type": "resolve_coincident_nodes",
+                            "flynn_id": int(flynn.get("flynn_id", flynn.get("label", -1))),
+                            "node_ids": [int(left_node), int(right_node)],
+                            "increment": float(increment),
+                        }
+                    )
+
+    return nodes, flynns, events, coincident_nodes_resolved, blocked_crossings
+
+
+def _faithful_delete_single_j_local(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    moved_node_id: int,
+    focus_nodes: set[int],
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int]:
+    events: list[dict[str, Any]] = []
+    _record_faithful_topology_stage(
+        events,
+        stage="delete_single_j",
+        moved_node_id=int(moved_node_id),
+        focus_nodes=focus_nodes,
+    )
+    nodes, flynns, single_events, deleted = _delete_single_nodes_local(
+        nodes,
+        flynns,
+        focus_nodes=focus_nodes,
+    )
+    events.extend(single_events)
     return nodes, flynns, events, deleted
 
 
@@ -5861,6 +7420,83 @@ def _edge_is_phase_boundary(
     return int(phase_a) != int(phase_b)
 
 
+def _incident_flynn_ids_for_node(
+    flynns: list[dict[str, Any]],
+    node_id: int,
+) -> list[int]:
+    return sorted(
+        {
+            int(flynn.get("flynn_id", flynn.get("label", flynn_index)))
+            for flynn_index, flynn in enumerate(flynns)
+            if int(node_id) in {int(entry) for entry in flynn["node_ids"]}
+        }
+    )
+
+
+def _nearest_short_triple_candidate(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    node_id: int,
+    switch_distance: float,
+    *,
+    node_neighbors: dict[int, set[int]] | None = None,
+    edge_map: dict[tuple[int, int], list[tuple[int, int]]] | None = None,
+) -> dict[str, Any] | None:
+    if node_neighbors is None:
+        node_neighbors = _node_neighbors(flynns)
+    neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
+    if len(neighbors) != 3:
+        return None
+
+    if edge_map is None:
+        edge_map = _edge_map(flynns)
+
+    candidates: list[tuple[float, int, tuple[int, int]]] = []
+    for neighbor_id in neighbors:
+        if len(node_neighbors.get(int(neighbor_id), set())) != 3:
+            continue
+        edge = tuple(sorted((int(node_id), int(neighbor_id))))
+        entries = edge_map.get(edge, [])
+        if len(entries) != 2:
+            continue
+        length = float(_edge_length(nodes, int(node_id), int(neighbor_id)))
+        if length >= float(switch_distance):
+            continue
+        candidates.append((length, int(neighbor_id), edge))
+
+    if not candidates:
+        return None
+
+    edge_length, target_neighbor, edge = min(candidates, key=lambda item: (item[0], item[1]))
+    return {
+        "node_id": int(node_id),
+        "target_neighbor": int(target_neighbor),
+        "edge": (int(edge[0]), int(edge[1])),
+        "edge_length": float(edge_length),
+    }
+
+
+def _triple_switch_possible_local(
+    node_a: int,
+    node_b: int,
+    flynns: list[dict[str, Any]],
+    *,
+    node_neighbors: dict[int, set[int]] | None = None,
+) -> bool:
+    if node_neighbors is None:
+        node_neighbors = _node_neighbors(flynns)
+    if len(node_neighbors.get(int(node_a), set())) != 3:
+        return False
+    if len(node_neighbors.get(int(node_b), set())) != 3:
+        return False
+
+    flynn_ids_a = _incident_flynn_ids_for_node(flynns, int(node_a))
+    flynn_ids_b = _incident_flynn_ids_for_node(flynns, int(node_b))
+    if len(flynn_ids_a) != 3 or len(flynn_ids_b) != 3:
+        return False
+    return flynn_ids_a != flynn_ids_b
+
+
 def _check_double_node_local(
     nodes: np.ndarray,
     flynns: list[dict[str, Any]],
@@ -5869,23 +7505,26 @@ def _check_double_node_local(
     switch_distance: float,
     min_node_separation: float,
     max_node_separation: float,
+    node_neighbors: dict[int, set[int]] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int]:
     events: list[dict[str, Any]] = []
     inserted_nodes = 0
     removed_nodes = 0
 
-    node_neighbors = _node_neighbors(flynns)
+    if node_neighbors is None:
+        node_neighbors = _node_neighbors(flynns)
     neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
     if len(neighbors) != 2:
         return nodes, flynns, events, inserted_nodes, removed_nodes
 
+    edge_map = _edge_map(flynns)
     for neighbor_id in list(neighbors):
         if int(node_id) >= len(nodes) or int(neighbor_id) >= len(nodes):
             continue
         length = _edge_length(nodes, int(node_id), int(neighbor_id))
         if length <= max_node_separation:
             continue
-        edge_entries = _edge_map(flynns).get(tuple(sorted((int(node_id), int(neighbor_id)))), [])
+        edge_entries = edge_map.get(tuple(sorted((int(node_id), int(neighbor_id)))), [])
         new_node_id = int(len(nodes))
         midpoint = _periodic_midpoint(nodes[int(node_id)], nodes[int(neighbor_id)])
         nodes = np.vstack([nodes, midpoint])
@@ -5907,10 +7546,11 @@ def _check_double_node_local(
                 }
             )
 
-    node_neighbors = _node_neighbors(flynns)
-    neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
-    if len(neighbors) != 2:
-        return nodes, flynns, events, inserted_nodes, removed_nodes
+    if inserted_nodes:
+        node_neighbors = _node_neighbors(flynns)
+        neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
+        if len(neighbors) != 2:
+            return nodes, flynns, events, inserted_nodes, removed_nodes
 
     for neighbor_id in neighbors:
         if int(node_id) >= len(nodes) or int(neighbor_id) >= len(nodes):
@@ -5953,6 +7593,9 @@ def _check_triple_node_local(
     min_node_separation: float,
     max_node_separation: float,
     phase_lookup: dict[int, int] | None = None,
+    run_post_switch_topology_check: bool = True,
+    node_neighbors: dict[int, set[int]] | None = None,
+    edge_map: dict[tuple[int, int], list[tuple[int, int]]] | None = None,
 ) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int, int, int]:
     events: list[dict[str, Any]] = []
     inserted_nodes = 0
@@ -5960,18 +7603,21 @@ def _check_triple_node_local(
     switched_edges = 0
     rejected_switches = 0
 
-    node_neighbors = _node_neighbors(flynns)
+    if node_neighbors is None:
+        node_neighbors = _node_neighbors(flynns)
     neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
     if len(neighbors) != 3:
         return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
 
+    if edge_map is None:
+        edge_map = _edge_map(flynns)
     for neighbor_id in list(neighbors):
         if int(node_id) >= len(nodes) or int(neighbor_id) >= len(nodes):
             continue
         length = _edge_length(nodes, int(node_id), int(neighbor_id))
         if length <= max_node_separation:
             continue
-        edge_entries = _edge_map(flynns).get(tuple(sorted((int(node_id), int(neighbor_id)))), [])
+        edge_entries = edge_map.get(tuple(sorted((int(node_id), int(neighbor_id)))), [])
         new_node_id = int(len(nodes))
         midpoint = _periodic_midpoint(nodes[int(node_id)], nodes[int(neighbor_id)])
         nodes = np.vstack([nodes, midpoint])
@@ -5993,17 +7639,18 @@ def _check_triple_node_local(
                 }
             )
 
-    node_neighbors = _node_neighbors(flynns)
-    neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
-    if len(neighbors) != 3:
-        return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
+    if inserted_nodes:
+        node_neighbors = _node_neighbors(flynns)
+        edge_map = _edge_map(flynns)
+        neighbors = sorted(int(value) for value in node_neighbors.get(int(node_id), set()))
+        if len(neighbors) != 3:
+            return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
 
-    triple_candidates: list[tuple[float, int]] = []
     for neighbor_id in neighbors:
         if int(node_id) >= len(nodes) or int(neighbor_id) >= len(nodes):
             continue
         length = _edge_length(nodes, int(node_id), int(neighbor_id))
-        neighbor_degree = len(_node_neighbors(flynns).get(int(neighbor_id), set()))
+        neighbor_degree = len(node_neighbors.get(int(neighbor_id), set()))
         if neighbor_degree == 2 and length < min_node_separation:
             nodes, flynns, event, deleted = _delete_double_node_local(
                 nodes,
@@ -6015,20 +7662,51 @@ def _check_triple_node_local(
             if deleted and event is not None:
                 removed_nodes += 1
                 events.append(event)
-                if len(_node_neighbors(flynns).get(int(node_id), set())) != 3:
+                node_neighbors = _node_neighbors(flynns)
+                edge_map = _edge_map(flynns)
+                if len(node_neighbors.get(int(node_id), set())) != 3:
                     return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
-        elif neighbor_degree == 3 and length < switch_distance:
-            triple_candidates.append((float(length), int(neighbor_id)))
 
-    if triple_candidates and len(_node_neighbors(flynns).get(int(node_id), set())) == 3:
-        _, target_neighbor = min(triple_candidates, key=lambda item: item[0])
-        edge_map = _edge_map(flynns)
-        target_edge = tuple(sorted((int(node_id), int(target_neighbor))))
-        target_length = float(_edge_length(nodes, int(node_id), int(target_neighbor)))
+    candidate = _nearest_short_triple_candidate(
+        nodes,
+        flynns,
+        int(node_id),
+        switch_distance,
+        node_neighbors=node_neighbors,
+        edge_map=edge_map,
+    )
+    if candidate is not None and len(node_neighbors.get(int(node_id), set())) == 3:
+        target_neighbor = int(candidate["target_neighbor"])
+        target_edge = tuple(candidate["edge"])
+        target_length = float(candidate["edge_length"])
+        if not _triple_switch_possible_local(
+            int(node_id),
+            int(target_neighbor),
+            flynns,
+            node_neighbors=node_neighbors,
+        ):
+            rejected_switches += 1
+            events.append(
+                _triple_switch_rejection_event(
+                    node_id=int(node_id),
+                    target_neighbor=int(target_neighbor),
+                    edge_length=float(target_length),
+                    reason="same_flynn_neighborhood",
+                )
+            )
+            return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
         is_phase_boundary = _edge_is_phase_boundary(target_edge, edge_map, flynns, phase_lookup)
         allow_switch = (not is_phase_boundary) or (target_length < (float(min_node_separation) * 0.1))
         if not allow_switch:
             rejected_switches += 1
+            events.append(
+                _triple_switch_rejection_event(
+                    node_id=int(node_id),
+                    target_neighbor=int(target_neighbor),
+                    edge_length=float(target_length),
+                    reason="phase_boundary_switch_forbidden",
+                )
+            )
             return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
         switched, event, rejected_reason = _switch_triple_edge(
             nodes,
@@ -6036,12 +7714,19 @@ def _check_triple_node_local(
             int(node_id),
             int(target_neighbor),
             switch_distance,
-            node_neighbors=_node_neighbors(flynns),
+            node_neighbors=node_neighbors,
             edge_map=edge_map,
             geometry_cache={},
+            min_node_separation=min_node_separation,
+            max_node_separation=max_node_separation,
+            phase_lookup=phase_lookup,
+            run_post_switch_topology_check=run_post_switch_topology_check,
         )
         if switched and event is not None:
-            switched_edges += 1
+            switched_edges += 1 + int(event.get("post_switch_switched_edges", 0))
+            inserted_nodes += int(event.get("post_switch_inserted_nodes", 0))
+            removed_nodes += int(event.get("post_switch_removed_nodes", 0))
+            rejected_switches += int(event.get("post_switch_rejected_switches", 0))
             event["edge_length"] = float(_edge_length(nodes, int(node_id), int(target_neighbor)))
             event["reason"] = (
                 "check_triple_forced_small_phase_boundary"
@@ -6051,8 +7736,100 @@ def _check_triple_node_local(
             events.append(event)
         elif rejected_reason is not None:
             rejected_switches += 1
+            events.append(
+                _triple_switch_rejection_event(
+                    node_id=int(node_id),
+                    target_neighbor=int(target_neighbor),
+                    edge_length=float(target_length),
+                    reason=str(rejected_reason),
+                )
+            )
 
     return nodes, flynns, events, inserted_nodes, removed_nodes, switched_edges, rejected_switches
+
+
+def _faithful_check_double_j_local(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    moved_node_id: int,
+    node_id: int,
+    switch_distance: float,
+    min_node_separation: float,
+    max_node_separation: float,
+    node_neighbors: dict[int, set[int]] | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    events: list[dict[str, Any]] = []
+    _record_faithful_topology_stage(
+        events,
+        stage="check_double_j",
+        moved_node_id=int(moved_node_id),
+        node_id=int(node_id),
+    )
+    nodes, flynns, local_events, inserted_nodes, removed_nodes = _check_double_node_local(
+        nodes,
+        flynns,
+        node_id=int(node_id),
+        switch_distance=switch_distance,
+        min_node_separation=min_node_separation,
+        max_node_separation=max_node_separation,
+        node_neighbors=node_neighbors,
+    )
+    events.extend(local_events)
+    return nodes, flynns, events, inserted_nodes, removed_nodes
+
+
+def _faithful_check_triple_j_local(
+    nodes: np.ndarray,
+    flynns: list[dict[str, Any]],
+    *,
+    moved_node_id: int,
+    node_id: int,
+    switch_distance: float,
+    min_node_separation: float,
+    max_node_separation: float,
+    phase_lookup: dict[int, int] | None = None,
+    run_post_switch_topology_check: bool = True,
+    node_neighbors: dict[int, set[int]] | None = None,
+    edge_map: dict[tuple[int, int], list[tuple[int, int]]] | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]], list[dict[str, Any]], int, int, int, int]:
+    events: list[dict[str, Any]] = []
+    _record_faithful_topology_stage(
+        events,
+        stage="check_triple_j",
+        moved_node_id=int(moved_node_id),
+        node_id=int(node_id),
+    )
+    (
+        nodes,
+        flynns,
+        local_events,
+        inserted_nodes,
+        removed_nodes,
+        switched_edges,
+        rejected_switches,
+    ) = _check_triple_node_local(
+        nodes,
+        flynns,
+        node_id=int(node_id),
+        switch_distance=switch_distance,
+        min_node_separation=min_node_separation,
+        max_node_separation=max_node_separation,
+        phase_lookup=phase_lookup,
+        run_post_switch_topology_check=run_post_switch_topology_check,
+        node_neighbors=node_neighbors,
+        edge_map=edge_map,
+    )
+    events.extend(local_events)
+    return (
+        nodes,
+        flynns,
+        events,
+        inserted_nodes,
+        removed_nodes,
+        switched_edges,
+        rejected_switches,
+    )
 
 
 def _maintain_mesh_locally(
@@ -6060,6 +7837,7 @@ def _maintain_mesh_locally(
     flynns: list[dict[str, Any]],
     *,
     moved_node_id: int,
+    previous_position: np.ndarray | None = None,
     grid_shape: tuple[int, int] | list[int],
     switch_distance: float,
     min_angle_degrees: float,
@@ -6097,78 +7875,76 @@ def _maintain_mesh_locally(
             widened_angles,
         )
 
-    if switch_distance > 0.0 and focus_nodes:
-        increment = float(switch_distance) / 5.0
-        checked_pairs: set[tuple[int, int]] = set()
-        node_keys = {
-            int(node_id): (round(float(xy[0]), 12), round(float(xy[1]), 12))
-            for node_id, xy in enumerate(nodes)
-        }
-        for flynn_index in sorted(_local_flynn_indices(flynns, focus_nodes)):
-            flynn = flynns[int(flynn_index)]
-            duplicate_groups: dict[tuple[float, float], list[int]] = {}
-            for node_id in [int(node_id) for node_id in flynn["node_ids"]]:
-                if int(node_id) not in focus_nodes:
-                    continue
-                duplicate_groups.setdefault(node_keys[int(node_id)], []).append(int(node_id))
-            for grouped_nodes in duplicate_groups.values():
-                if len(grouped_nodes) < 2:
-                    continue
-                for left_index in range(len(grouped_nodes) - 1):
-                    left_node = int(grouped_nodes[left_index])
-                    for right_index in range(left_index + 1, len(grouped_nodes)):
-                        right_node = int(grouped_nodes[right_index])
-                        pair = tuple(sorted((left_node, right_node)))
-                        if pair in checked_pairs:
-                            continue
-                        checked_pairs.add(pair)
-                        separation = _periodic_relative(nodes[right_node], nodes[left_node])
-                        if float(np.hypot(separation[0], separation[1])) > 1.0e-12:
-                            continue
-                        origin = nodes[left_node].copy()
-                        candidate_plus = (origin + np.array([increment, increment], dtype=np.float64)) % 1.0
-                        candidate_minus = (origin - np.array([increment, increment], dtype=np.float64)) % 1.0
-                        dist_plus = float(np.hypot(*_periodic_relative(nodes[right_node], candidate_plus)))
-                        dist_minus = float(np.hypot(*_periodic_relative(nodes[right_node], candidate_minus)))
-                        nodes[left_node] = candidate_minus if dist_minus > dist_plus else candidate_plus
-                        coincident_nodes_resolved += 1
-                        events.append(
-                            {
-                                "type": "resolve_coincident_nodes",
-                                "flynn_id": int(flynn.get("flynn_id", flynn.get("label", -1))),
-                                "node_ids": [int(left_node), int(right_node)],
-                                "increment": float(increment),
-                            }
-                        )
-
-    nodes, flynns, single_events, deleted_single_nodes = _delete_single_nodes_local(
+    nodes, flynns, crossing_events, local_coincident, blocked_crossings = _faithful_crossings_check_local(
         nodes,
         flynns,
+        moved_node_id=int(moved_node_id),
+        focus_nodes=focus_nodes,
+        switch_distance=switch_distance,
+        previous_position=previous_position,
+    )
+    coincident_nodes_resolved += local_coincident
+    events.extend(crossing_events)
+    if blocked_crossings:
+        return (
+            nodes,
+            flynns,
+            events,
+            switched_edges,
+            rejected_switches,
+            merged_flynns,
+            split_flynns,
+            inserted_nodes,
+            removed_nodes,
+            coincident_nodes_resolved,
+            deleted_small_flynns,
+            widened_angles,
+        )
+
+    nodes, flynns, single_events, deleted_single_nodes = _faithful_delete_single_j_local(
+        nodes,
+        flynns,
+        moved_node_id=int(moved_node_id),
         focus_nodes=focus_nodes,
     )
+    events.extend(single_events)
     if deleted_single_nodes:
-        events.extend(single_events)
-        node_neighbors, focus_nodes = _refresh_local_focus_nodes(moved_node_id, focus_nodes, flynns)
+        node_neighbors = _node_neighbors(flynns)
+        node_neighbors, focus_nodes = _refresh_local_focus_nodes(
+            moved_node_id,
+            focus_nodes,
+            flynns,
+            node_neighbors=node_neighbors,
+        )
 
-    node_neighbors, focus_nodes = _refresh_local_focus_nodes(moved_node_id, focus_nodes, flynns)
+    node_neighbors = _node_neighbors(flynns)
+    node_neighbors, focus_nodes = _refresh_local_focus_nodes(
+        moved_node_id,
+        focus_nodes,
+        flynns,
+        node_neighbors=node_neighbors,
+    )
     check_queue = [int(node_id) for node_id in sorted(focus_nodes)]
     seen_queue = set(check_queue)
     while check_queue:
         node_id = int(check_queue.pop(0))
-        node_neighbors = _node_neighbors(flynns)
         degree = len(node_neighbors.get(int(node_id), set()))
+        topology_changed = False
         if degree == 2:
-            nodes, flynns, local_events, local_inserted, local_removed = _check_double_node_local(
+            nodes, flynns, local_events, local_inserted, local_removed = _faithful_check_double_j_local(
                 nodes,
                 flynns,
+                moved_node_id=int(moved_node_id),
                 node_id=int(node_id),
                 switch_distance=switch_distance,
                 min_node_separation=min_node_separation,
                 max_node_separation=max_node_separation,
+                node_neighbors=node_neighbors,
             )
             inserted_nodes += local_inserted
             removed_nodes += local_removed
             events.extend(local_events)
+            topology_changed = bool(local_inserted or local_removed)
         elif degree == 3:
             (
                 nodes,
@@ -6178,25 +7954,43 @@ def _maintain_mesh_locally(
                 local_removed,
                 local_switched,
                 local_rejected,
-            ) = _check_triple_node_local(
+            ) = _faithful_check_triple_j_local(
                 nodes,
                 flynns,
+                moved_node_id=int(moved_node_id),
                 node_id=int(node_id),
                 switch_distance=switch_distance,
                 min_node_separation=min_node_separation,
                 max_node_separation=max_node_separation,
                 phase_lookup=phase_lookup,
+                node_neighbors=node_neighbors,
+                edge_map=_edge_map(flynns),
             )
             inserted_nodes += local_inserted
             removed_nodes += local_removed
             switched_edges += local_switched
             rejected_switches += local_rejected
             events.extend(local_events)
-        node_neighbors, focus_nodes = _refresh_local_focus_nodes(moved_node_id, focus_nodes | {int(node_id)}, flynns)
-        for candidate in sorted(focus_nodes):
-            if int(candidate) not in seen_queue:
-                check_queue.append(int(candidate))
-                seen_queue.add(int(candidate))
+            topology_changed = bool(local_inserted or local_removed or local_switched)
+        if topology_changed:
+            node_neighbors = _node_neighbors(flynns)
+            node_neighbors, focus_nodes = _refresh_local_focus_nodes(
+                moved_node_id,
+                focus_nodes | {int(node_id)},
+                flynns,
+                node_neighbors=node_neighbors,
+            )
+            for candidate in sorted(focus_nodes):
+                if int(candidate) not in seen_queue:
+                    check_queue.append(int(candidate))
+                    seen_queue.add(int(candidate))
+
+    _record_faithful_topology_stage(
+        events,
+        stage="update_topology_state",
+        moved_node_id=int(moved_node_id),
+        focus_nodes=focus_nodes,
+    )
 
     if inserted_nodes or removed_nodes or deleted_small_flynns or merged_flynns or split_flynns:
         nodes, flynns = _compact_mesh(nodes, flynns)
@@ -6288,29 +8082,59 @@ def _maintain_mesh_once(
     edge_map = _edge_map(flynns)
     node_neighbors = _node_neighbors(flynns)
     switch_geometry_cache: dict[int, dict[str, float | bool]] = {}
-    edge_candidates = sorted(edge_map)
-    for edge in edge_candidates:
-        if _edge_length(nodes, edge[0], edge[1]) >= switch_distance:
+    attempted_triple_edges: set[tuple[int, int]] = set()
+    triple_node_ids = sorted(int(node_id) for node_id, neighbors in node_neighbors.items() if len(neighbors) == 3)
+    for node_id in triple_node_ids:
+        node_neighbors = _node_neighbors(flynns)
+        edge_map = _edge_map(flynns)
+        if len(node_neighbors.get(int(node_id), set())) != 3:
             continue
+        candidate = _nearest_short_triple_candidate(
+            nodes,
+            flynns,
+            int(node_id),
+            switch_distance,
+            node_neighbors=node_neighbors,
+            edge_map=edge_map,
+        )
+        if candidate is None:
+            continue
+        edge = tuple(candidate["edge"])
+        if edge in attempted_triple_edges:
+            continue
+        attempted_triple_edges.add(edge)
         switched, event, rejected_reason = _switch_triple_edge(
             nodes,
             flynns,
-            edge[0],
-            edge[1],
+            int(edge[0]),
+            int(edge[1]),
             switch_distance,
             node_neighbors=node_neighbors,
             edge_map=edge_map,
             geometry_cache=switch_geometry_cache,
+            min_node_separation=min_node_separation,
+            max_node_separation=max_node_separation,
         )
         if switched and event is not None:
-            switched_edges += 1
-            event["edge_length"] = float(_edge_length(nodes, edge[0], edge[1]))
+            switched_edges += 1 + int(event.get("post_switch_switched_edges", 0))
+            inserted_nodes += int(event.get("post_switch_inserted_nodes", 0))
+            removed_nodes += int(event.get("post_switch_removed_nodes", 0))
+            rejected_switches += int(event.get("post_switch_rejected_switches", 0))
+            event["edge_length"] = float(candidate["edge_length"])
             events.append(event)
             edge_map = _edge_map(flynns)
             node_neighbors = _node_neighbors(flynns)
             switch_geometry_cache = {}
         elif rejected_reason is not None:
             rejected_switches += 1
+            events.append(
+                _triple_switch_rejection_event(
+                    node_id=int(edge[0]),
+                    target_neighbor=int(edge[1]),
+                    edge_length=float(candidate["edge_length"]),
+                    reason=str(rejected_reason),
+                )
+            )
 
     nodes, flynns, angle_events, widened_angles = _widen_acute_angles(
         nodes,
@@ -6442,26 +8266,48 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
     faithful_immediate_topology = bool(
         config.movement_model == "elle_surface" and int(config.topology_steps) > 0
     )
+    phase_db = (
+        load_phase_boundary_db(config.phase_db_path)
+        if config.movement_model == "elle_surface"
+        else None
+    )
 
     for iteration in range(total_iterations):
         if iteration < int(config.steps):
             node_neighbors = _node_neighbors(flynns)
             edge_mobility_lookup: dict[tuple[int, int], float] = {}
+            edge_boundary_energy_lookup: dict[tuple[int, int], float] = {}
             stored_energy_context: dict[str, Any] | None = None
             flynn_phase_lookup: dict[int, int] | None = None
+            flynn_euler_lookup: dict[int, tuple[float, float, float]] | None = None
+            current_edge_map: dict[tuple[int, int], list[tuple[int, int]]] = {}
             if config.movement_model == "elle_surface":
-                phase_db = load_phase_boundary_db(config.phase_db_path)
                 flynn_phase_lookup = _build_flynn_phase_lookup(
                     mesh_state,
                     flynns,
                     default_phase=int(phase_db.first_phase),
                 )
+                flynn_euler_lookup = _build_flynn_euler_lookup(mesh_state, flynns)
+                current_edge_map = _edge_map(flynns)
                 edge_mobility_lookup = _build_edge_mobility_lookup(
                     mesh_state,
                     flynns,
-                    _edge_map(flynns),
+                    current_edge_map,
                     phase_db_path=config.phase_db_path,
                     temperature_c=config.temperature_c,
+                    phase_db=phase_db,
+                    phase_lookup=flynn_phase_lookup,
+                    nodes=nodes,
+                    euler_lookup=flynn_euler_lookup,
+                )
+                edge_boundary_energy_lookup = _build_edge_boundary_energy_lookup(
+                    mesh_state,
+                    flynns,
+                    current_edge_map,
+                    phase_db_path=config.phase_db_path,
+                    default_boundary_energy=config.boundary_energy,
+                    phase_db=phase_db,
+                    phase_lookup=flynn_phase_lookup,
                 )
                 stored_energy_context = _build_stored_energy_context(
                     mesh_state,
@@ -6492,6 +8338,15 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                         )
                         for neighbor_id in ordered
                     ]
+                    segment_boundary_energies = [
+                        float(
+                            edge_boundary_energy_lookup.get(
+                                tuple(sorted((int(node_id), int(neighbor_id)))),
+                                config.boundary_energy,
+                            )
+                        )
+                        for neighbor_id in ordered
+                    ]
                     increment = _move_node_elle_surface(
                         int(node_id),
                         node_xy,
@@ -6502,6 +8357,7 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                         config.speed_up,
                         flynns=flynns,
                         boundary_energy=config.boundary_energy,
+                        segment_boundary_energies=segment_boundary_energies,
                         use_diagonal_trials=config.use_diagonal_trials,
                         unit_length=unit_length,
                         segment_mobilities=segment_mobilities,
@@ -6517,8 +8373,13 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                 nodes[int(node_id)] = (node_xy + increment) % 1.0
 
                 if faithful_immediate_topology:
+                    pre_topology_nodes = nodes.copy()
+                    processed_old_ids = [int(value) for value in node_order[:order_index]]
+                    remaining_old_ids = [int(value) for value in node_order[order_index:]]
                     before_nodes = int(len(nodes))
                     before_flynns = int(len(flynns))
+                    local_inserted_total = 0
+                    local_removed_total = 0
                     for _ in range(int(config.topology_steps)):
                         (
                             nodes,
@@ -6537,6 +8398,7 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                             nodes,
                             flynns,
                             moved_node_id=int(node_id),
+                            previous_position=node_xy,
                             grid_shape=grid_shape,
                             switch_distance=switch_distance,
                             min_angle_degrees=config.min_angle_degrees,
@@ -6550,24 +8412,51 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                         split_total += split_count
                         inserted_total += inserted
                         removed_total += removed
+                        local_inserted_total += inserted
+                        local_removed_total += removed
                         coincident_total += coincident
                         deleted_small_total += deleted_small
                         widened_angle_total += widened_angles
                         events.extend(iteration_events)
                     node_neighbors = _node_neighbors(flynns)
                     if config.movement_model == "elle_surface":
-                        phase_db = load_phase_boundary_db(config.phase_db_path)
-                        flynn_phase_lookup = _build_flynn_phase_lookup(
-                            mesh_state,
-                            flynns,
-                            default_phase=int(phase_db.first_phase),
+                        topology_changed = (
+                            int(len(nodes)) != before_nodes
+                            or int(len(flynns)) != before_flynns
+                            or int(local_inserted_total) > 0
+                            or int(local_removed_total) > 0
+                            or int(switched) > 0
+                            or int(merged) > 0
+                            or int(split_count) > 0
+                            or int(deleted_small) > 0
                         )
+                        if topology_changed:
+                            flynn_phase_lookup = _build_flynn_phase_lookup(
+                                mesh_state,
+                                flynns,
+                                default_phase=int(phase_db.first_phase),
+                            )
+                            flynn_euler_lookup = _build_flynn_euler_lookup(mesh_state, flynns)
+                            current_edge_map = _edge_map(flynns)
+                            edge_boundary_energy_lookup = _build_edge_boundary_energy_lookup(
+                                mesh_state,
+                                flynns,
+                                current_edge_map,
+                                phase_db_path=config.phase_db_path,
+                                default_boundary_energy=config.boundary_energy,
+                                phase_db=phase_db,
+                                phase_lookup=flynn_phase_lookup,
+                            )
                         edge_mobility_lookup = _build_edge_mobility_lookup(
                             mesh_state,
                             flynns,
-                            _edge_map(flynns),
+                            current_edge_map,
                             phase_db_path=config.phase_db_path,
                             temperature_c=config.temperature_c,
+                            phase_db=phase_db,
+                            phase_lookup=flynn_phase_lookup,
+                            nodes=nodes,
+                            euler_lookup=flynn_euler_lookup,
                         )
                         stored_energy_context = _build_stored_energy_context(
                             mesh_state,
@@ -6575,8 +8464,14 @@ def relax_mesh_state(mesh_state: dict[str, Any], config: MeshRelaxationConfig) -
                             flynns,
                             phase_db_path=config.phase_db_path,
                         )
-                    if int(len(nodes)) != before_nodes or int(len(flynns)) != before_flynns:
-                        node_order = list(int(value) for value in rng.permutation(len(nodes)))
+                    if topology_changed:
+                        node_order = _rebuild_remaining_node_order(
+                            pre_topology_nodes,
+                            nodes,
+                            processed_old_ids=processed_old_ids,
+                            remaining_old_ids=remaining_old_ids,
+                            rng=rng,
+                        )
                         order_index = 0
 
             if faithful_immediate_topology and int(config.topology_steps) > 0:

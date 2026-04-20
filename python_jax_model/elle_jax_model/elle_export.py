@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from .artifacts import dominant_grain_map, snapshot_statistics
+from .faithful_config import FaithfulElleOptions
 
 
 def _as_numpy(phi) -> np.ndarray:
@@ -16,26 +17,54 @@ def _as_numpy(phi) -> np.ndarray:
     return phi_np
 
 
-def _write_options(handle, nx: int, ny: int) -> None:
+def _write_options(
+    handle,
+    nx: int,
+    ny: int,
+    elle_options_payload: FaithfulElleOptions | dict[str, Any] | None = None,
+) -> None:
     switch_distance = 0.5 / float(max(nx, ny))
     max_node_separation = 2.2 * switch_distance
     min_node_separation = switch_distance
+    if isinstance(elle_options_payload, FaithfulElleOptions):
+        elle_options = elle_options_payload
+    else:
+        elle_options = FaithfulElleOptions.from_runtime_dict(
+            elle_options_payload if isinstance(elle_options_payload, dict) else None
+        )
+
+    switch_distance = float(elle_options.get("SwitchDistance", switch_distance))
+    max_node_separation = float(elle_options.get("MaxNodeSeparation", max_node_separation))
+    min_node_separation = float(elle_options.get("MinNodeSeparation", min_node_separation))
+    speed_up = float(elle_options.get("SpeedUp", 1.0))
+    time_step = float(elle_options.get("Timestep", 1.0))
+    unit_length = float(elle_options.get("UnitLength", 1.0))
+    temperature_c = float(elle_options.get("Temperature", 25.0))
+    pressure = float(elle_options.get("Pressure", 1.0))
+    boundary_width = elle_options.get("BoundaryWidth")
+    mass_increment = elle_options.get("MassIncrement")
 
     handle.write("OPTIONS\n")
     handle.write(f"SwitchDistance {switch_distance:.8e}\n")
     handle.write(f"MaxNodeSeparation {max_node_separation:.8e}\n")
     handle.write(f"MinNodeSeparation {min_node_separation:.8e}\n")
-    handle.write("SpeedUp 1.00000000e+00\n")
-    handle.write("CellBoundingBox 0.00000000e+00 0.00000000e+00\n")
-    handle.write("                1.00000000e+00 0.00000000e+00 \n")
-    handle.write("                1.00000000e+00 1.00000000e+00 \n")
-    handle.write("                0.00000000e+00 1.00000000e+00 \n")
-    handle.write("SimpleShearOffset 0.00000000e+00\n")
-    handle.write("CumulativeSimpleShear 0.00000000e+00\n")
-    handle.write("Timestep 1.00000000e+00\n")
-    handle.write("UnitLength 1.00000000e+00\n")
-    handle.write("Temperature 2.50000000e+01\n")
-    handle.write("Pressure 1.00000000e+00\n")
+    handle.write(f"SpeedUp {speed_up:.8e}\n")
+    box = tuple(elle_options.cell_bounding_box)
+    handle.write(f"CellBoundingBox {float(box[0][0]):.8e} {float(box[0][1]):.8e}\n")
+    for x_coord, y_coord in box[1:]:
+        handle.write(f"                {float(x_coord):.8e} {float(y_coord):.8e} \n")
+    handle.write(f"SimpleShearOffset {float(elle_options.simple_shear_offset):.8e}\n")
+    handle.write(
+        f"CumulativeSimpleShear {float(elle_options.cumulative_simple_shear):.8e}\n"
+    )
+    handle.write(f"Timestep {time_step:.8e}\n")
+    handle.write(f"UnitLength {unit_length:.8e}\n")
+    handle.write(f"Temperature {temperature_c:.8e}\n")
+    handle.write(f"Pressure {pressure:.8e}\n")
+    if boundary_width is not None:
+        handle.write(f"BoundaryWidth {float(boundary_width):.8e}\n")
+    if mass_increment is not None:
+        handle.write(f"MassIncrement {float(mass_increment):.8e}\n")
 
 
 def _format_sparse_record(values: tuple[float, ...]) -> str:
@@ -462,6 +491,7 @@ def write_unode_elle(
     runtime_seed_node_fields = None if mesh_state is None else mesh_state.get("_runtime_seed_node_fields")
     runtime_seed_unode_sections = None if mesh_state is None else mesh_state.get("_runtime_seed_unode_sections")
     runtime_seed_node_sections = None if mesh_state is None else mesh_state.get("_runtime_seed_node_sections")
+    runtime_elle_options = None if mesh_state is None else mesh_state.get("_runtime_elle_options")
     runtime_seed_flynn_sections = None if mesh_state is None else (
         mesh_state.get("_runtime_current_flynn_sections")
         or mesh_state.get("_runtime_seed_flynn_sections")
@@ -540,7 +570,7 @@ def write_unode_elle(
                     f"removed={int(mesh_stats.get('mesh_removed_nodes', 0))}\n"
                 )
 
-        _write_options(handle, nx, ny)
+        _write_options(handle, nx, ny, runtime_elle_options)
 
         handle.write("FLYNNS\n")
         for flynn in flynns:
@@ -657,11 +687,17 @@ def write_unode_elle(
                     if runtime_seed_fields is not None
                     else {}
                 )
+                runtime_field_order = (
+                    tuple(str(name) for name in runtime_seed_fields.get("field_order", runtime_field_values.keys()))
+                    if runtime_seed_fields is not None
+                    else ()
+                )
                 runtime_label_attribute = (
                     str(runtime_seed_fields.get("label_attribute", ""))
                     if runtime_seed_fields is not None
                     else ""
                 )
+                written_fields: set[str] = set()
                 for field_name in runtime_seed_unode_sections.get("field_order", ()):
                     dense_values = unode_section_values.get(str(field_name))
                     default_value = unode_defaults.get(str(field_name))
@@ -687,6 +723,27 @@ def write_unode_elle(
                         unode_ids,
                         dense_values,
                         tuple(float(value) for value in default_value),
+                    )
+                    written_fields.add(str(field_name))
+                # The legacy runtime can keep scalar unode fields alive even when
+                # the sparse section metadata only tracks a subset of them. Keep
+                # those scalar sections in ELLE exports instead of silently
+                # dropping them whenever runtime_seed_unode_sections is present.
+                for field_name in runtime_field_order:
+                    if str(field_name) in written_fields:
+                        continue
+                    if str(field_name) not in runtime_field_values:
+                        continue
+                    default_value = tuple(
+                        float(value)
+                        for value in unode_defaults.get(str(field_name), (0.0,))
+                    )
+                    _write_sparse_numeric_section(
+                        handle,
+                        str(field_name),
+                        unode_ids,
+                        tuple((float(value),) for value in runtime_field_values[str(field_name)]),
+                        default_value if default_value else (0.0,),
                     )
             elif runtime_seed_fields is not None:
                 field_order = [

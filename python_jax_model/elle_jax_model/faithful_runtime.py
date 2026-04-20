@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""Faithful runtime loop for solver-parity work.
+
+This module is part of the supported fidelity surface.
+Prototype phase-field runtimes remain archive-only for parity decisions.
+"""
+
 import copy
 from typing import Any, Callable
 
@@ -7,8 +13,19 @@ import numpy as np
 
 from .artifacts import dominant_grain_map
 from .faithful_config import FaithfulSolverConfig
-from .fft_bridge import FFTMechanicsSnapshot, apply_legacy_fft_snapshot_to_mesh_state
-from .mesh import MeshFeedbackConfig, couple_mesh_to_order_parameters, mesh_labels_to_order_parameters
+from .fft_bridge import (
+    FFTMechanicsSnapshot,
+    LegacyFFTImportOptions,
+    apply_legacy_fft_snapshot_to_mesh_state,
+)
+from .mesh import (
+    MeshFeedbackConfig,
+    MeshRelaxationConfig,
+    assign_seed_unodes_from_mesh,
+    couple_mesh_to_order_parameters,
+    mesh_labels_to_order_parameters,
+    relax_mesh_state,
+)
 from .nucleation import NucleationConfig, apply_nucleation_stage
 from .recovery import RecoveryConfig, apply_recovery_stage
 from .topology import TopologyTracker, run_simulation_with_topology
@@ -46,6 +63,84 @@ def initialize_faithful_order_parameters(config: FaithfulSolverConfig) -> np.nda
     return (labels[None, :, :] == grain_ids).astype(np.float32)
 
 
+def _apply_initial_raw_seed_topology_pass(
+    config: FaithfulSolverConfig,
+    runtime_mesh_state: dict[str, Any] | None,
+    mesh_feedback: MeshFeedbackConfig,
+    *,
+    has_mechanics_snapshot: bool,
+) -> dict[str, Any] | None:
+    if runtime_mesh_state is None:
+        return None
+    if str(config.seed_data.attribute) != "derived_from_flynns":
+        return runtime_mesh_state
+    if has_mechanics_snapshot:
+        return runtime_mesh_state
+
+    topology_passes = max(1, int(mesh_feedback.relax_config.topology_steps))
+    topocheck_config = MeshRelaxationConfig(
+        steps=0,
+        topology_steps=int(topology_passes),
+        time_step=float(mesh_feedback.relax_config.time_step),
+        speed_up=float(mesh_feedback.relax_config.speed_up),
+        switch_distance=mesh_feedback.relax_config.switch_distance,
+        min_angle_degrees=float(mesh_feedback.relax_config.min_angle_degrees),
+        movement_model=str(mesh_feedback.relax_config.movement_model),
+        use_diagonal_trials=bool(mesh_feedback.relax_config.use_diagonal_trials),
+        use_elle_physical_units=bool(mesh_feedback.relax_config.use_elle_physical_units),
+        boundary_energy=float(mesh_feedback.relax_config.boundary_energy),
+        random_seed=int(mesh_feedback.relax_config.random_seed),
+        min_node_separation_factor=float(mesh_feedback.relax_config.min_node_separation_factor),
+        max_node_separation_factor=float(mesh_feedback.relax_config.max_node_separation_factor),
+        temperature_c=float(mesh_feedback.relax_config.temperature_c),
+        phase_db_path=mesh_feedback.relax_config.phase_db_path,
+    )
+    topocheck_mesh_state = relax_mesh_state(runtime_mesh_state, topocheck_config)
+    topocheck_mesh_state.setdefault("stats", {})
+    topocheck_mesh_state["stats"]["workflow_initial_topocheck_applied"] = 1
+    topocheck_mesh_state["stats"]["workflow_initial_topocheck_topology_steps"] = int(
+        topology_passes
+    )
+    return topocheck_mesh_state
+
+
+def _current_runtime_labels(
+    phi: np.ndarray,
+    runtime_mesh_state: dict[str, Any] | None,
+) -> np.ndarray:
+    current_labels = dominant_grain_map(np.asarray(phi, dtype=np.float32))
+    if runtime_mesh_state is None:
+        return np.asarray(current_labels, dtype=np.int32)
+    seed_unodes = runtime_mesh_state.get("_runtime_seed_unodes")
+    if seed_unodes is None:
+        return np.asarray(current_labels, dtype=np.int32)
+    flynns = runtime_mesh_state.get("flynns", ())
+    compact_id_by_flynn_id = {
+        int(flynn["flynn_id"]): index
+        for index, flynn in enumerate(
+            sorted(
+                (flynn for flynn in flynns if isinstance(flynn, dict) and "flynn_id" in flynn),
+                key=lambda flynn: int(flynn["flynn_id"]),
+            )
+        )
+    }
+    remapped_mesh_state = copy.deepcopy(runtime_mesh_state)
+    remapped_flynns = []
+    for flynn in remapped_mesh_state.get("flynns", ()):
+        if not isinstance(flynn, dict):
+            continue
+        flynn_copy = dict(flynn)
+        flynn_copy["label"] = int(compact_id_by_flynn_id.get(int(flynn["flynn_id"]), 0))
+        remapped_flynns.append(flynn_copy)
+    remapped_mesh_state["flynns"] = remapped_flynns
+    mesh_labels, _stats = assign_seed_unodes_from_mesh(
+        remapped_mesh_state,
+        seed_unodes,
+        fallback_labels=current_labels,
+    )
+    return np.asarray(mesh_labels, dtype=np.int32)
+
+
 def run_faithful_simulation(
     config: FaithfulSolverConfig,
     steps: int,
@@ -54,6 +149,7 @@ def run_faithful_simulation(
     mesh_feedback: MeshFeedbackConfig | None = None,
     mechanics_snapshot: FFTMechanicsSnapshot | None = None,
     mechanics_snapshots: tuple[FFTMechanicsSnapshot, ...] | None = None,
+    mechanics_import_options: LegacyFFTImportOptions | None = None,
     include_initial_snapshot: bool = False,
     subloops_per_snapshot: int = 1,
     gbm_steps_per_subloop: int = 1,
@@ -82,6 +178,8 @@ def run_faithful_simulation(
         nucleation_config = NucleationConfig()
     if recovery_config is None:
         recovery_config = RecoveryConfig()
+    if mechanics_import_options is None:
+        mechanics_import_options = LegacyFFTImportOptions()
     has_mechanics_snapshot = bool(mechanics_snapshots) or mechanics_snapshot is not None
     subloop_stage_count = (
         int(nucleation_steps_per_subloop)
@@ -144,6 +242,13 @@ def run_faithful_simulation(
         if on_snapshot is not None:
             on_snapshot(0, initial_snapshot, initial_context)
 
+    runtime_mesh_state = _apply_initial_raw_seed_topology_pass(
+        config,
+        runtime_mesh_state,
+        mesh_feedback,
+        has_mechanics_snapshot=bool(has_mechanics_snapshot),
+    )
+
     stage_index = 0
     for outer_step in range(1, steps + 1):
         mesh_feedback_context: dict[str, Any] | None = None
@@ -170,6 +275,7 @@ def run_faithful_simulation(
             mechanics_mesh_state, mechanics_stats = apply_legacy_fft_snapshot_to_mesh_state(
                 mechanics_mesh_state,
                 current_mechanics_snapshot,
+                import_options=mechanics_import_options,
             )
             mechanics_stats = {
                 **mechanics_stats,
@@ -223,7 +329,7 @@ def run_faithful_simulation(
         for subloop_index in range(1, int(subloops_per_snapshot) + 1):
             for nucleation_index in range(1, int(nucleation_steps_per_subloop) + 1):
                 stage_index += 1
-                nucleation_labels = dominant_grain_map(np.asarray(phi, dtype=np.float32))
+                nucleation_labels = _current_runtime_labels(phi, runtime_mesh_state)
                 nucleation_mesh_state = (
                     runtime_mesh_state
                     if runtime_mesh_state is not None
@@ -470,6 +576,7 @@ def run_faithful_simulation_with_topology(
     recovery_steps_per_subloop: int = 0,
     mechanics_snapshot: FFTMechanicsSnapshot | None = None,
     mechanics_snapshots: tuple[FFTMechanicsSnapshot, ...] | None = None,
+    mechanics_import_options: LegacyFFTImportOptions | None = None,
     nucleation_config: NucleationConfig | None = None,
     recovery_config: RecoveryConfig | None = None,
 ) -> tuple[object, list[object], list[dict[str, Any]]]:
@@ -477,6 +584,7 @@ def run_faithful_simulation_with_topology(
         return run_faithful_simulation(
             mechanics_snapshot=mechanics_snapshot,
             mechanics_snapshots=mechanics_snapshots,
+            mechanics_import_options=mechanics_import_options,
             include_initial_snapshot=include_initial_snapshot,
             subloops_per_snapshot=int(subloops_per_snapshot),
             gbm_steps_per_subloop=int(gbm_steps_per_subloop),

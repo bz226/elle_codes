@@ -240,6 +240,7 @@ def _extract_legacy_dense_state(
         raise ValueError(f"reference snapshot requires LOCATION, FLYNNS, and UNODES sections: {path}")
 
     unodes = _parse_unodes(sections["UNODES"])
+    layout = _layout_from_unodes(unodes)
     ordered_unodes = sorted((int(unode_id), float(x), float(y)) for unode_id, x, y in unodes)
     ordered_unode_ids = [int(unode_id) for unode_id, _, _ in ordered_unodes]
 
@@ -284,9 +285,43 @@ def _extract_legacy_dense_state(
         "sections": sections,
         "labels_summary": labels_summary,
         "labels": label_field,
+        "ordered_unode_ids": ordered_unode_ids,
+        "unode_grid_indices": tuple(
+            (
+                int(layout["id_lookup"][int(unode_id)][0]),
+                int(layout["id_lookup"][int(unode_id)][1]),
+            )
+            for unode_id, _, _ in ordered_unodes
+        ),
         "dense_fields": dense_fields,
         "field_metadata": field_metadata,
     }
+
+
+def _legacy_swept_unode_mask(
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+) -> np.ndarray | None:
+    before_labels = before_state.get("labels")
+    after_labels = after_state.get("labels")
+    if before_labels is None or after_labels is None:
+        return None
+    before_labels_np = np.asarray(before_labels, dtype=np.int32)
+    after_labels_np = np.asarray(after_labels, dtype=np.int32)
+    if before_labels_np.shape != after_labels_np.shape:
+        return None
+
+    unode_grid_indices = np.asarray(before_state.get("unode_grid_indices", ()), dtype=np.int32)
+    if unode_grid_indices.ndim != 2 or unode_grid_indices.shape[1] != 2:
+        return None
+    if unode_grid_indices.shape[0] == 0:
+        return np.zeros((0,), dtype=bool)
+
+    changed_grid = before_labels_np != after_labels_np
+    return np.asarray(
+        changed_grid[unode_grid_indices[:, 0], unode_grid_indices[:, 1]],
+        dtype=bool,
+    )
 
 
 def extract_legacy_reference_snapshot(
@@ -427,6 +462,99 @@ def extract_legacy_reference_transition(
         "after_path": str(Path(after_elle_path)),
         "field_names": selected_fields,
         "label_transition": label_transition,
+        "field_transitions": field_transitions,
+    }
+
+
+def extract_legacy_reference_swept_unode_transition(
+    before_elle_path: str | Path,
+    after_elle_path: str | Path,
+    *,
+    checkpoint_name: str | None = None,
+    label_attribute: str = "auto",
+    field_names: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    before_state = _extract_legacy_dense_state(before_elle_path, label_attribute=label_attribute)
+    after_state = _extract_legacy_dense_state(after_elle_path, label_attribute=label_attribute)
+
+    swept_mask = _legacy_swept_unode_mask(before_state, after_state)
+    swept_available = swept_mask is not None
+    swept_rows = int(np.count_nonzero(swept_mask)) if swept_mask is not None else 0
+    total_unodes = len(before_state.get("ordered_unode_ids", ()))
+
+    candidate_fields = sorted(set(before_state["dense_fields"]) & set(after_state["dense_fields"]))
+    if field_names is None:
+        selected_fields = [
+            str(name)
+            for name in candidate_fields
+            if str(before_state["field_metadata"][str(name)]["entity_type"]) == "unode"
+        ]
+    else:
+        selected_fields = [
+            str(name)
+            for name in field_names
+            if (
+                str(name) in before_state["dense_fields"]
+                and str(name) in after_state["dense_fields"]
+                and str(before_state["field_metadata"][str(name)]["entity_type"]) == "unode"
+            )
+        ]
+
+    field_transitions: dict[str, dict[str, Any]] = {}
+    for name in selected_fields:
+        before_field = np.asarray(before_state["dense_fields"][name], dtype=np.float64)
+        after_field = np.asarray(after_state["dense_fields"][name], dtype=np.float64)
+        if before_field.shape != after_field.shape:
+            field_transitions[str(name)] = {
+                "shape_matches": False,
+                "before_shape": list(before_field.shape),
+                "after_shape": list(after_field.shape),
+            }
+            continue
+
+        if swept_mask is None:
+            field_transitions[str(name)] = {
+                "shape_matches": True,
+                "component_count": int(before_field.shape[1]),
+                "swept_rows": 0,
+                "changed_swept_rows": 0,
+                "changed_swept_fraction": 0.0,
+                "mean_abs_swept_delta": 0.0,
+                "max_abs_swept_delta": 0.0,
+                "before_swept_hash": _sha256_bytes(b""),
+                "after_swept_hash": _sha256_bytes(b""),
+                "swept_delta_hash": _sha256_bytes(b""),
+            }
+            continue
+
+        before_swept = np.asarray(before_field[swept_mask], dtype=np.float64)
+        after_swept = np.asarray(after_field[swept_mask], dtype=np.float64)
+        delta = np.asarray(after_swept - before_swept, dtype=np.float64)
+        row_active = np.any(np.abs(delta) > 1.0e-12, axis=1) if delta.ndim == 2 else np.zeros((0,), dtype=bool)
+        field_transitions[str(name)] = {
+            "shape_matches": True,
+            "component_count": int(before_field.shape[1]),
+            "swept_rows": int(before_swept.shape[0]),
+            "changed_swept_rows": int(np.count_nonzero(row_active)),
+            "changed_swept_fraction": float(np.count_nonzero(row_active)) / float(before_swept.shape[0]) if before_swept.shape[0] else 0.0,
+            "mean_abs_swept_delta": float(np.mean(np.abs(delta))) if delta.size else 0.0,
+            "max_abs_swept_delta": float(np.max(np.abs(delta))) if delta.size else 0.0,
+            "before_swept_hash": _sha256_bytes(before_swept.tobytes()),
+            "after_swept_hash": _sha256_bytes(after_swept.tobytes()),
+            "swept_delta_hash": _sha256_bytes(delta.tobytes()),
+        }
+
+    return {
+        "checkpoint_name": str(checkpoint_name or f"{Path(before_elle_path).stem}_to_{Path(after_elle_path).stem}_swept"),
+        "before_path": str(Path(before_elle_path)),
+        "after_path": str(Path(after_elle_path)),
+        "field_names": selected_fields,
+        "swept_unodes": {
+            "available": bool(swept_available),
+            "swept_rows": int(swept_rows),
+            "swept_fraction": float(swept_rows) / float(total_unodes) if total_unodes else 0.0,
+            "swept_mask_hash": _sha256_bytes(np.asarray(swept_mask if swept_mask is not None else np.zeros((0,), dtype=np.uint8), dtype=np.uint8).tobytes()),
+        },
         "field_transitions": field_transitions,
     }
 
@@ -614,6 +742,60 @@ def compare_legacy_reference_transition(
             and sorted(set(candidate_fields) - set(reference_fields)) == []
         ),
         "label_transition": label_report,
+        "field_transitions": field_report,
+        "missing_field_transitions": sorted(set(reference_fields) - set(candidate_fields)),
+        "unexpected_field_transitions": sorted(set(candidate_fields) - set(reference_fields)),
+        "mismatched_field_transitions": mismatched_fields,
+    }
+
+
+def compare_legacy_reference_swept_unode_transition(
+    before_elle_path: str | Path,
+    after_elle_path: str | Path,
+    reference_transition: dict[str, Any],
+    *,
+    label_attribute: str = "auto",
+) -> dict[str, Any]:
+    candidate_transition = extract_legacy_reference_swept_unode_transition(
+        before_elle_path,
+        after_elle_path,
+        checkpoint_name=str(reference_transition.get("checkpoint_name", "")),
+        label_attribute=label_attribute,
+        field_names=tuple(reference_transition.get("field_names", ())),
+    )
+
+    swept_report = {
+        key: _compare_scalar(reference_transition["swept_unodes"].get(key), candidate_transition["swept_unodes"].get(key))
+        for key in sorted(set(reference_transition.get("swept_unodes", {})) | set(candidate_transition.get("swept_unodes", {})))
+    }
+
+    reference_fields = reference_transition.get("field_transitions", {})
+    candidate_fields = candidate_transition.get("field_transitions", {})
+    shared_names = sorted(set(reference_fields) & set(candidate_fields))
+    field_report = {
+        name: {
+            key: _compare_scalar(reference_fields[name].get(key), candidate_fields[name].get(key))
+            for key in sorted(set(reference_fields[name]) | set(candidate_fields[name]))
+        }
+        for name in shared_names
+    }
+    mismatched_fields = sorted(
+        name
+        for name, values in field_report.items()
+        if not all(result["matches"] for result in values.values())
+    )
+
+    return {
+        "reference_checkpoint_name": str(reference_transition.get("checkpoint_name", "")),
+        "candidate_before_path": str(Path(before_elle_path)),
+        "candidate_after_path": str(Path(after_elle_path)),
+        "matches": (
+            all(result["matches"] for result in swept_report.values())
+            and not mismatched_fields
+            and sorted(set(reference_fields) - set(candidate_fields)) == []
+            and sorted(set(candidate_fields) - set(reference_fields)) == []
+        ),
+        "swept_unodes": swept_report,
         "field_transitions": field_report,
         "missing_field_transitions": sorted(set(reference_fields) - set(candidate_fields)),
         "unexpected_field_transitions": sorted(set(candidate_fields) - set(reference_fields)),

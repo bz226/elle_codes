@@ -4,6 +4,7 @@ from __future__ import annotations
 
 This module is the supported parity target for the faithful branch.
 It intentionally avoids depending on the archived phase-field runtime.
+Prototype modules remain importable only for history and comparison.
 """
 
 from dataclasses import dataclass, replace
@@ -13,7 +14,11 @@ from typing import Any, Callable
 import numpy as np
 
 from .faithful_config import FaithfulSeedData, FaithfulSolverConfig, load_faithful_seed
-from .fft_bridge import FFTMechanicsSnapshot, load_legacy_fft_snapshot_sequence
+from .fft_bridge import (
+    FFTMechanicsSnapshot,
+    LegacyFFTImportOptions,
+    load_legacy_fft_snapshot_sequence,
+)
 from .faithful_runtime import run_faithful_simulation_with_topology
 from .mesh import MeshFeedbackConfig, MeshRelaxationConfig, load_elle_mesh_seed
 from .nucleation import NucleationConfig
@@ -25,7 +30,7 @@ FAITHFUL_GBM_DEFAULTS = {
     "topology_passes": 1,
     "use_diagonal_trials": True,
     "use_elle_physical_units": True,
-    "temperature_c": 25.0,
+    "temperature_c": None,
     "random_seed": 0,
     "stage_interval": 1,
     "subloops_per_snapshot": 1,
@@ -39,6 +44,10 @@ FAITHFUL_GBM_DEFAULTS = {
     "recovery_trial_rotation_deg": 0.1,
     "recovery_rotation_mobility_length": 500.0,
     "raster_boundary_band": 1,
+    "mechanics_import_dislocation_densities": True,
+    "mechanics_exclude_phase_id": 0,
+    "mechanics_density_update_mode": "increment",
+    "mechanics_host_repair_mode": "fs_check_unodes",
 }
 
 
@@ -52,6 +61,7 @@ class FaithfulGBMSetup:
     mesh_seed: dict[str, Any]
     mechanics_snapshot: FFTMechanicsSnapshot | None
     mechanics_snapshots: tuple[FFTMechanicsSnapshot, ...]
+    mechanics_import_options: LegacyFFTImportOptions
     mesh_relax_overrides: dict[str, float]
     subloops_per_snapshot: int
     gbm_steps_per_subloop: int
@@ -90,7 +100,7 @@ def build_faithful_gbm_setup(
     topology_passes: int = int(FAITHFUL_GBM_DEFAULTS["topology_passes"]),
     use_diagonal_trials: bool = bool(FAITHFUL_GBM_DEFAULTS["use_diagonal_trials"]),
     use_elle_physical_units: bool = bool(FAITHFUL_GBM_DEFAULTS["use_elle_physical_units"]),
-    temperature_c: float = float(FAITHFUL_GBM_DEFAULTS["temperature_c"]),
+    temperature_c: float | None = FAITHFUL_GBM_DEFAULTS["temperature_c"],
     random_seed: int = int(FAITHFUL_GBM_DEFAULTS["random_seed"]),
     stage_interval: int = int(FAITHFUL_GBM_DEFAULTS["stage_interval"]),
     subloops_per_snapshot: int = int(FAITHFUL_GBM_DEFAULTS["subloops_per_snapshot"]),
@@ -116,6 +126,12 @@ def build_faithful_gbm_setup(
     mesh_feedback_every: int | None = None,
     mesh_feedback_boundary_width: int | None = None,
     mechanics_snapshot_dir: str | Path | None = None,
+    mechanics_import_dislocation_densities: bool = bool(
+        FAITHFUL_GBM_DEFAULTS["mechanics_import_dislocation_densities"]
+    ),
+    mechanics_exclude_phase_id: int = int(FAITHFUL_GBM_DEFAULTS["mechanics_exclude_phase_id"]),
+    mechanics_density_update_mode: str = str(FAITHFUL_GBM_DEFAULTS["mechanics_density_update_mode"]),
+    mechanics_host_repair_mode: str = str(FAITHFUL_GBM_DEFAULTS["mechanics_host_repair_mode"]),
 ) -> FaithfulGBMSetup:
     """Build the original-ELLE-style mesh-only GBM runtime configuration."""
 
@@ -142,6 +158,7 @@ def build_faithful_gbm_setup(
         init_elle_path,
         {
             "source_labels": seed_info.source_labels,
+            "label_field": seed_info.label_field,
             "grid_shape": seed_info.grid_shape,
             "unode_ids": seed_info.unode_ids,
             "unode_positions": seed_info.unode_positions,
@@ -168,13 +185,20 @@ def build_faithful_gbm_setup(
             fallback=int(FAITHFUL_GBM_DEFAULTS["raster_boundary_band"]),
         )
 
+    inherited_temperature_c = seed_info.elle_options.get("Temperature", 25.0)
+    effective_temperature_c = (
+        float(inherited_temperature_c)
+        if temperature_c is None
+        else float(temperature_c)
+    )
+
     mesh_config = MeshRelaxationConfig(
         steps=int(motion_passes),
         topology_steps=int(topology_passes),
         movement_model=str(movement_model),
         use_diagonal_trials=bool(use_diagonal_trials),
         use_elle_physical_units=bool(use_elle_physical_units),
-        temperature_c=float(temperature_c),
+        temperature_c=float(effective_temperature_c),
         random_seed=int(random_seed),
         phase_db_path=phase_db_path,
     )
@@ -198,6 +222,28 @@ def build_faithful_gbm_setup(
             ),
         )
 
+    effective_elle_options = seed_info.elle_options.with_scalar_overrides(
+        {
+            "SwitchDistance": mesh_config.switch_distance,
+            "MinNodeSeparation": (
+                float(mesh_config.min_node_separation_factor) * float(mesh_config.switch_distance)
+                if mesh_config.switch_distance is not None
+                else None
+            ),
+            "MaxNodeSeparation": (
+                float(mesh_config.max_node_separation_factor) * float(mesh_config.switch_distance)
+                if mesh_config.switch_distance is not None
+                else None
+            ),
+            "SpeedUp": float(mesh_config.speed_up),
+            "Timestep": float(mesh_config.time_step),
+            "Temperature": float(mesh_config.temperature_c),
+        }
+    )
+    mesh_seed["_runtime_elle_options"] = effective_elle_options.to_runtime_dict()
+    for key, value in effective_elle_options.scalar_values.items():
+        mesh_seed["stats"][f"elle_option_{str(key).lower()}"] = float(value)
+
     mesh_feedback = MeshFeedbackConfig(
         every=int(stage_interval),
         strength=0.0,
@@ -220,6 +266,12 @@ def build_faithful_gbm_setup(
         mesh_seed=mesh_seed,
         mechanics_snapshot=mechanics_snapshot,
         mechanics_snapshots=tuple(mechanics_snapshots),
+        mechanics_import_options=LegacyFFTImportOptions(
+            import_dislocation_densities=bool(mechanics_import_dislocation_densities),
+            exclude_phase_id=int(mechanics_exclude_phase_id),
+            density_update_mode=str(mechanics_density_update_mode),
+            host_repair_mode=str(mechanics_host_repair_mode),
+        ),
         mesh_relax_overrides=relax_overrides,
         subloops_per_snapshot=int(subloops_per_snapshot),
         gbm_steps_per_subloop=int(gbm_steps_per_subloop),
@@ -268,6 +320,7 @@ def run_faithful_gbm_simulation(
         mesh_feedback=setup.mesh_feedback,
         mechanics_snapshot=setup.mechanics_snapshot,
         mechanics_snapshots=setup.mechanics_snapshots,
+        mechanics_import_options=setup.mechanics_import_options,
         include_initial_snapshot=bool(include_initial_snapshot),
         subloops_per_snapshot=int(setup.subloops_per_snapshot),
         gbm_steps_per_subloop=int(setup.gbm_steps_per_subloop),

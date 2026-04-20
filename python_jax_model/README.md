@@ -1,110 +1,146 @@
-# ELLE Python/JAX Prototype Rewrite
+# ELLE Python Faithful Translation
 
-This folder contains a **clean-room Python rewrite prototype** inspired by ELLE's grain-growth style process drivers (for example `processes/growth/gg.main.cc`).
+This folder now has two tracks:
 
-It does **not** modify or replace the original C/C++ codebase. Instead, it demonstrates a modern, vectorized modeling path using JAX.
+- supported solver-parity track: the NumPy-first faithful ELLE + FFT translation centered on [run_gbm_faithful.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_gbm_faithful.py)
+- archive/prototype track: older phase-field and mixed-runner experiments kept for history, debugging, and comparison
 
-## What this prototype includes
+If the goal is **faithful translation**, start with:
 
-- A small 2D phase-field grain-growth simulator in JAX (with NumPy fallback if JAX is unavailable).
-- A direct Python/JAX port of the original `processes/phasefield/phasefield.elle.cc` single-order-parameter process, including latent heat, anisotropic interface width, and the coupled temperature field.
-- Reproducible initial-condition generators, including a Voronoi-style grain map that is closer to ELLE-style microstructure layouts.
-- A simulation runner that exports raw fields plus derived grain-ID, boundary, stats, and preview artifacts.
-- Stable flynn tracking across saved timesteps, with per-step topology snapshots and history.
-- A mesh-evolution layer that moves double and triple junctions and applies ELLE-style node-spacing checks after topology extraction.
-- A standalone renderer for existing `.npy` snapshots.
-- Lightweight unit tests for initialization, simulation, and artifact generation.
+- [run_gbm_faithful.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_gbm_faithful.py)
+- [elle_jax_model/gbm_faithful.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/gbm_faithful.py)
+- [elle_jax_model/faithful_runtime.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/faithful_runtime.py)
+- [elle_jax_model/faithful_config.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/faithful_config.py)
 
-## Why this is a practical migration path
+The faithful branch is trying to mirror the original solver structure:
 
-A full rewrite of the entire ELLE ecosystem is large, but **yes, it is possible** to incrementally rewrite process-by-process.
-This prototype shows one such process-level migration:
+- ELLE flynns and bnodes plus regular-grid unodes
+- outer loop with mechanics followed by DRX subloops
+- GBM, recovery, and mechanics replay stages as explicit runtime steps
+- ELLE option round-trip instead of synthetic export defaults
+- legacy-reference and benchmark tooling for parity checks
 
-1. Keep old C/C++ binaries untouched.
-2. Reimplement one physics kernel in Python/JAX.
-3. Validate behavior against known ELLE outputs.
-4. Expand coverage process-by-process.
+The older phase-field path is still importable, but it is not the solver-parity target anymore.
 
-## Quick start
+## Faithful Quick Start
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r python_jax_model/requirements.txt
-python python_jax_model/run_simulation.py --steps 300 --save-every 60 --init-mode voronoi --save-elle --track-topology --mesh-relax-steps 3 --mesh-topology-steps 1 --mesh-kernel-every 5 --mesh-kernel-strength 1.0 --mesh-kernel-corrector --mesh-feedback-every 20 --mesh-transport-strength 1.0 --mesh-feedback-strength 0.2 --outdir python_jax_model/output
+python python_jax_model/run_gbm_faithful.py --init-elle /path/to/fine_foam_step001.elle --steps 10 --save-every 1 --include-step0 --save-elle --track-topology --outdir python_jax_model/validation/faithful_run
 ```
 
-To seed the multiphase rewrite from an existing ELLE grain map instead of a synthetic Voronoi layout:
+Useful faithful controls:
 
-```bash
-python python_jax_model/run_simulation.py --init-mode elle --init-elle /path/to/fine_foam_step001.elle --steps 10 --save-every 1 --save-elle --track-topology --outdir python_jax_model/output_from_elle
-```
+- `--subloops-per-snapshot`, `--gbm-steps-per-subloop`, `--recovery-steps-per-subloop`
+- `--motion-passes`, `--topology-passes`, `--stage-interval`
+- `--temperature-c` and `--phase-db` for legacy mobility semantics
+- `--mechanics-snapshot-dir` and `--mechanics-only` for explicit FFT-bridge replay cases
+- `--mechanics-density-update-mode` to mirror legacy `fft2elle` DD overwrite vs increment branches
 
-By default the loader now tries to auto-detect the unode attribute that behaves like a grain-ID field. If you already know the correct attribute for a file, you can override it with `--init-elle-attribute U_ATTRIB_C` or another section name.
-When mesh coupling is enabled on an ELLE-seeded run, the runtime now also imports the original `LOCATION`, `FLYNNS`, and key `OPTIONS` values (`SwitchDistance`, `MinNodeSeparation`, `MaxNodeSeparation`, `SpeedUp`) so the mesh-feedback path starts from the original ELLE boundary network instead of reconstructing the first mesh from raster labels alone.
+For faithful benchmark parity work, keep the guide rules in mind:
 
-To rerun the current best-known calibrated `fine_foam` branch directly from the CLI, add the calibrated preset:
+- do not tune phase-field coefficients to chase parity
+- do not treat nucleation as part of benchmark mode
+- do not use the archived mixed runner as the fidelity target
 
-```bash
-python python_jax_model/run_simulation.py --preset fine-foam-calibrated --init-mode elle --init-elle /path/to/fine_foam_step001.elle --steps 10 --save-every 1 --save-elle --track-topology --outdir python_jax_model/output_from_elle_calibrated
-```
+## Faithful Validation And Workflow
 
-Right now that preset expands to `dt=0.025`, `mobility=1.0`, `gradient_penalty=1.25`, and `interaction_strength=1.5`, which is the best `fine_foam` match we have measured so far.
-It also overrides the ELLE seeding knobs to `init_smoothing_steps=0` and `init_noise=0.0`, so the preset reproduces the calibrated run instead of the noisier CLI defaults.
-For backward compatibility, `--preset fine-foam-best` still points to this same older calibrated branch.
-
-To run the newer, more structurally faithful ELLE-mesh branch separately:
-
-```bash
-python python_jax_model/run_simulation.py --preset fine-foam-truthful-mesh --init-mode elle --init-elle /path/to/fine_foam_step001.elle --steps 10 --save-every 1 --save-elle --track-topology --outdir python_jax_model/output_from_elle_truthful_mesh
-```
-
-That truthful preset keeps the same calibrated phase-field coefficients, but it also turns on the ELLE-seeded mesh path with `mesh_relax_steps=1`, `mesh_topology_steps=1`, `mesh_movement_model=elle_surface`, `mesh_update_mode=mesh_only`, and `mesh_feedback_every=1`, so we can improve the mesh-faithful branch separately from the older raster-first calibrated branch.
-The `elle_surface` movement model is a more literal nod to the original ELLE GBM code: it probes surface energy at `±SwitchDistance` in `x/y`, can now also include the original ELLE-style diagonal trial pivots, forms a trial-difference force vector, and then advances double and triple junctions with an ELLE-style denominator based on incident segment lengths and projected normals. Its timestep handling is also closer now: the truthful branch follows the `GetMoveDir` gate that requires both force components to be active, and it resets `speedup` to `1.0` before falling back to the local 90%-of-maximum movement clamp. The truthful preset also now enables an ELLE-style physical-unit path for that denominator, so `UnitLength` from the seed file participates in the motion law instead of being dropped after import. The `mesh_only` update mode then skips the phase-field blend for that branch and reassigns the original ELLE-seeded unode points from the moved flynn polygons before writing grain IDs back to the grid, which is closer to the original “move boundaries, topocheck, update unodes” sequence than the older PDE-plus-feedback approximation. It now also preserves and rewrites original ELLE `U_*` unode sections and `N_ATTRIB_*` / `N_CONC_*` node sections when those are present in the seed file, and matching `U_CONC_*` / `N_CONC_*` fields now share one segment ledger: swept unode mass is removed from incremented swept-triangle shell records, those increments use area-scaled endpoint cosine-bell weights closer to ELLE's `Weights[j][i]` construction, and each increment now carries separate `sweep`, `enrich`, and `reassigned` masks so reassigned overlap points can be treated separately instead of using one coarse triangle mask. Boundary-side bookkeeping is now also carried per increment rather than only at the aggregated node level, so each increment keeps its own old/new boundary-area share, source mass, capacity, weighted `conc_s / conc_s1 / conc_e / conc_e1 / conc_b` state, the ELLE-style `Total_Sweep_Weights[0/1/2]` and `Total_Enrich_Weights[0/1/2]` channels, a `partition_active` flag, final boundary-mass contribution, and explicit `mass_chge_s / mass_chge_e / mass_chge_b` terms before the node totals are assembled. In the node-aware branch, the literal `PartitionMass(...)`-style node solve now determines final node concentration and `put_mass`, the enrich-side delta (`mass_chge_e`) is what gets applied back to unodes, and the raw redistributed share is kept separately in the ledger for inspection. Node concentrations are updated from that same ledger, and the unode enrichment uses the same segment bookkeeping before the final correction.
-Under the hood that truthful branch now dispatches to an explicit NumPy runner instead of the JAX phase-field loop, so the faithful path is separated in code as well as in behavior.
-
-If you want the same faithful GBM stage structure without the `fine_foam`-specific benchmark tuning, use the general faithful preset instead:
-
-```bash
-python python_jax_model/run_simulation.py --preset gbm-faithful-default --init-mode elle --init-elle /path/to/example.elle --steps 10 --save-every 1 --save-elle --track-topology --outdir python_jax_model/output_from_elle_gbm_default
-```
-
-That preset keeps the ELLE-seeded `mesh_only` GBM path, but it only enforces the general stage defaults:
-- zero-noise ELLE seeding
-- one movement pass per saved stage
-- one topology-cleanup pass per saved stage
-- `elle_surface` movement
-- diagonal trial pivots
-- `UnitLength`-aware motion
-- raster boundary support derived from the seed file's `BoundaryWidth` and `UnitLength` when available, with a stable one-cell fallback
-
-Unlike the `fine-foam-truthful-mesh` preset, it does not advertise the old benchmark-shaped phase-field coefficients as meaningful faithful controls.
-
-If you want to call that faithful path explicitly rather than through the mixed prototype CLI, use the dedicated NumPy runner:
-
-```bash
-python python_jax_model/run_gbm_faithful.py --init-elle /path/to/fine_foam_step001.elle --steps 10 --save-every 1 --save-elle --track-topology --outdir python_jax_model/output_truthful_numpy
-```
-
-The faithful GBM branch now also has a dedicated module boundary in [gbm_faithful.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/gbm_faithful.py), so the original-ELLE-style NumPy path can evolve separately from the older mixed simulation runner. [run_truthful_numpy.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_truthful_numpy.py) remains as a compatibility alias to the new dedicated runner.
-
-That dedicated runner now exposes faithful GBM-stage controls such as `--motion-passes`, `--topology-passes`, `--stage-interval`, `--subloops-per-snapshot`, `--nucleation-steps-per-subloop`, `--gbm-steps-per-subloop`, `--recovery-steps-per-subloop`, `--raster-boundary-band`, and the original-code mobility inputs `--temperature-c` and `--phase-db`. The subloop controls let one saved faithful snapshot represent multiple original-style inner stages before output is written, which is important when comparing against workflows like the shipped `fine_foam` launch script where one saved `stepXXX` file is heavier than a single GBM stage. A first faithful recovery slice is now also available: it applies local Euler-angle trial rotations, updates `U_ATTRIB_F` as average local misorientation, and reduces `U_DISLOCDEN` proportionally to accepted local recovery. A first faithful nucleation slice is now also wired in: it detects large secondary subgrain clusters from `U_EULER_3` and can promote them into new labels before the next GBM stage, using a conservative override layer so these new labels are not immediately erased by the following mesh-only remap. The same runner can also replay frozen legacy mechanics snapshots before each saved outer step through `--mechanics-snapshot-dir`, and `--mechanics-only` disables nucleation, GBM, and recovery subloops so you can build a mechanics-only parity case without forcing an artificial mesh-evolution stage. The faithful CLI still does not advertise hidden PDE knobs, because the `mesh_only` branch is driven by ELLE seed geometry, node motion, topology repair, Arrhenius-scaled phase-pair mobility, unode reassignment, and now explicit mechanics, nucleation, and recovery stages rather than by phase-field coefficients.
-
-To run that mechanics-only parity path against a legacy before/after ELLE pair:
-
-```bash
-python python_jax_model/validate_faithful_mechanics_transition.py --init-elle /path/to/before.elle --mechanics-snapshot-dir /path/to/fft_snapshot_sequence --reference-before /path/to/before.elle --reference-after /path/to/after.elle --outdir python_jax_model/validation/faithful_mechanics_transition --json-out python_jax_model/validation/faithful_mechanics_transition/report.json
-```
-
-If you want the faithful guide to run as an ordered checkpoint workflow with resumable verification instead of stopping after every milestone, use:
+To run the automated checkpoint workflow from the guide:
 
 ```bash
 python python_jax_model/run_faithful_workflow.py
 ```
 
-That runner follows the guide order, records checkpoint state under `python_jax_model/validation/workflow/`, and reuses the existing targeted test and validation scripts for the automated steps. The checkpoint flow is documented in [docs/faithful_workflow.md](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/docs/faithful_workflow.md).
+That runner follows the guide order, records checkpoint state under `python_jax_model/validation/workflow/`, and reuses the existing targeted tests and validation scripts. The checkpoint flow is documented in [docs/faithful_workflow.md](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/docs/faithful_workflow.md).
 
-To run the more faithful direct port of ELLE's original `phasefield` process:
+To run a mechanics-only parity replay against a legacy before/after ELLE pair:
+
+```bash
+python python_jax_model/validate_faithful_mechanics_transition.py --init-elle /path/to/before.elle --mechanics-snapshot-dir /path/to/fft_snapshot_sequence --reference-before /path/to/before.elle --reference-after /path/to/after.elle --outdir python_jax_model/validation/faithful_mechanics_transition --json-out python_jax_model/validation/faithful_mechanics_transition/report.json
+```
+
+To validate one frozen FFT -> ELLE mechanics import directly against the faithful runtime state:
+
+```bash
+python python_jax_model/validate_faithful_fft2elle_bridge.py --init-elle /path/to/inifft001.elle --mechanics-snapshot-dir /path/to/fft_snapshot --json-out python_jax_model/validation/faithful_fft2elle_bridge.json
+```
+
+That report checks the import-side bridge contract explicitly:
+- Euler import
+- unode position transfer
+- host-flynn / label-field sync after moved unode positions
+- `FS_CheckUnodes`-style swept-unode repair for `U_EULER_3` and `U_DISLOCDEN`
+- legacy tracer initialization for `U_ATTRIB_C` / `F_ATTRIB_C` when those mechanics-side host-flynn fields are missing
+- cell reset / shear update
+- `tex.out` strain, stress, and activity columns
+- DD increment import and phase exclusion semantics
+- DD overwrite vs increment mode
+- stored runtime snapshot payload
+
+The bridge layer also now covers the export side of the old contract. `elle_jax_model.fft_bridge` can build/load/write faithful `make.out` / `temp.out` payloads, and the shipped `processes/fft/example/step0` files are used as the current real export-side parity anchor.
+The export adapter can also mirror both legacy phase-ID conventions: `VISCOSITY` for `FS_elle2fft`, or `DISLOCDEN` for the shipped `processes/fft/elle2fft` path.
+It also supports the old `FS_ExcludeFlynns` style export by omitting grain headers and writing point grain IDs as `0`.
+
+To compare a faithful ELLE seed directly against a legacy `make.out` / `temp.out` bridge snapshot:
+
+```bash
+python python_jax_model/validate_faithful_elle2fft_bridge.py --init-elle /path/to/inifft001.elle --reference-dir /path/to/step0 --json-out python_jax_model/validation/faithful_elle2fft_bridge.json
+```
+
+That report distinguishes between:
+- full bridge match
+- bridge match excluding grain-header Euler rows
+- header-only mismatch
+
+To run the current benchmark and Figure-2-style validation helpers on a candidate ELLE sequence:
+
+```bash
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --candidate-dir /path/to/your_candidate_sequence --data-dir /path/to/TwoWayIceModel_Release/data --pattern '*.elle' --json-out python_jax_model/validation/benchmark_validation_report.json
+python python_jax_model/validate_figure2_line.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --candidate-dir /path/to/your_candidate_sequence --pattern '*.elle' --json-out python_jax_model/validation/figure2_line_validation.json --html-out python_jax_model/validation/figure2_line_validation.html
+```
+
+To score a local experiment-family suite for the paper-style `0`, `1`, `10`, `25` runs, you can now provide either repeated explicit directory mappings, a JSON manifest, a root directory with discoverable family subdirectories, or precomputed benchmark report JSONs for each family:
+
+```bash
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family 0=/path/to/family0 --experiment-family 1=/path/to/family1 --experiment-family 10=/path/to/family10 --experiment-family 25=/path/to/family25
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family-manifest /path/to/families.json
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family-root /path/to/family_suite
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family-report 0=/path/to/family0_report.json --experiment-family-report 1=/path/to/family1_report.json --experiment-family-report 10=/path/to/family10_report.json --experiment-family-report 25=/path/to/family25_report.json
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family-report-manifest /path/to/family_reports.json
+python python_jax_model/validate_benchmarks.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --data-dir /path/to/TwoWayIceModel_Release/data --experiment-family-report-root /path/to/family_report_suite
+```
+
+If you only want the family-suite report itself, there is now a dedicated entrypoint:
+
+```bash
+python python_jax_model/validate_experiment_families.py --experiment-family-root /path/to/family_suite
+python python_jax_model/validate_experiment_families.py --experiment-family-manifest /path/to/families.json
+python python_jax_model/validate_experiment_families.py --experiment-family 0=/path/to/family0 --experiment-family 1=/path/to/family1 --experiment-family 10=/path/to/family10 --experiment-family 25=/path/to/family25
+python python_jax_model/validate_experiment_families.py --experiment-family-report-manifest /path/to/family_reports.json
+python python_jax_model/validate_experiment_families.py --experiment-family-report-root /path/to/family_report_suite
+```
+
+## Archive / Prototype Tools
+
+The following modules remain available for history and side-by-side experimentation, but they are **not** the supported fidelity path:
+
+- [run_simulation.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_simulation.py)
+- [elle_jax_model/simulation.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/simulation.py)
+- [elle_jax_model/elle_phasefield.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/elle_phasefield.py)
+- [run_elle_phasefield.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/run_elle_phasefield.py)
+- older calibrated presets and parameter-search tooling around the mixed runner
+
+Those tools are still useful for:
+
+- understanding earlier prototype behavior
+- reproducing older calibration experiments
+- debugging viewer and export utilities against saved prototype outputs
+
+They should not drive faithful solver design decisions.
+
+To run the archived direct port of ELLE's original `phasefield` process:
 
 ```bash
 python python_jax_model/run_elle_phasefield.py --steps 200 --save-every 50 --outdir python_jax_model/output_phasefield
@@ -127,6 +163,8 @@ To run the Python port over a whole saved sequence and, when the original binary
 ```bash
 python python_jax_model/validate_elle_phasefield.py --input-elle processes/phasefield/inphase.elle --steps 5 --save-every 1 --python-outdir python_jax_model/validation/python --original-outdir python_jax_model/validation/original --json-out python_jax_model/validation/report.json --binary binwx/elle_phasefield
 ```
+
+## Validation And Analysis Tools
 
 To extract benchmark targets directly from the Llorens and Liu/Suckale papers and combine them with the local ELLE/FNO release data:
 
@@ -154,13 +192,15 @@ The benchmark report now includes two comparison tracks:
 - `static_grain_growth`: polygon/flynn-based ELLE comparison
 - `rasterized_grain_growth`: periodic connected-component comparison on the unode grain-ID field, which is often the fairer comparison for the grid-based Python rewrite
 
-To calibrate the ELLE-seeded rewrite directly against the `fine_foam` reference trajectory and rank a small parameter sweep automatically:
+## Archive Calibration Tools
+
+To rerun the archived calibration-oriented mixed-runner sweep against the `fine_foam` reference trajectory:
 
 ```bash
 python python_jax_model/calibrate_fine_foam.py --reference-dir /path/to/TwoWayIceModel_Release/elle/example/results --pattern 'fine_foam_step*.elle' --output-dir python_jax_model/validation/fine_foam_calibration --json-out python_jax_model/validation/fine_foam_calibration_report.json --dt-grid 0.01 0.02 0.03 --mobility-grid 0.5 0.75 1.0
 ```
 
-This calibration report writes one candidate ELLE sequence per parameter set, scores each run against the rasterized and polygon `fine_foam` benchmarks, and highlights the current best match.
+This calibration report writes one candidate ELLE sequence per parameter set, scores each run against the rasterized and polygon `fine_foam` benchmarks, and highlights the current best match for that older mixed-runner branch.
 Calibration now reuses existing candidate ELLE sequences in the output directory by default, so you can rerun or extend a search without regenerating completed runs. Add `--no-reuse-existing` if you want to force regeneration.
 
 To score an existing calibration directory, including partially completed runs, and rank what is already on disk:

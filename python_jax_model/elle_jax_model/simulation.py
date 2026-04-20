@@ -125,96 +125,24 @@ def load_elle_label_seed(
     *,
     attribute: str = "auto",
 ) -> dict[str, object]:
-    from .elle_visualize import (
-        _field_from_sparse_unodes,
-        _parse_elle_sections,
-        _parse_flynns,
-        _parse_sparse_values,
-        _parse_unodes,
-    )
+    from .faithful_config import load_faithful_seed
 
-    path = Path(elle_path)
-    sections = _parse_elle_sections(path)
-    if "UNODES" not in sections:
-        raise ValueError(f"ELLE file has no UNODES section: {path}")
-
-    unodes = _parse_unodes(sections["UNODES"])
-    requested_attribute = str(attribute)
-    if requested_attribute.lower() == "auto":
-        flynn_count = len(_parse_flynns(sections.get("FLYNNS", ())))
-        attr_candidates = [
-            name for name in sections if name.startswith("U_ATTRIB_") or name.startswith("U_CONC_")
-        ]
-        if not attr_candidates:
-            raise ValueError(f"ELLE file has no unode attribute sections to seed from: {path}")
-
-        scored_candidates: list[tuple[tuple[float, float, str], str]] = []
-        integer_like_candidates: set[str] = set()
-        for name in attr_candidates:
-            field_np, _, _ = _field_from_sparse_unodes(unodes, sections[name])
-            array = np.asarray(field_np, dtype=np.float64)
-            rounded = np.rint(array)
-            integer_residual = float(np.max(np.abs(array - rounded))) if array.size else float("inf")
-            unique_labels = sorted(int(value) for value in np.unique(rounded))
-            unique_count = len(unique_labels)
-            if unique_count <= 1:
-                continue
-            if integer_residual <= 5.1e-1:
-                integer_like_candidates.add(str(name))
-                closeness = abs(unique_count - flynn_count) if flynn_count > 0 else float(unique_count)
-                scored_candidates.append(((closeness, integer_residual, float(unique_count), name), name))
-
-        if "U_ATTRIB_C" in integer_like_candidates:
-            requested_attribute = "U_ATTRIB_C"
-        elif scored_candidates:
-            scored_candidates.sort(key=lambda item: item[0])
-            requested_attribute = scored_candidates[0][1]
-        else:
-            raise ValueError(f"could not auto-detect an integer-like ELLE grain-label attribute in {path}")
-    elif requested_attribute not in sections:
-        raise ValueError(f"ELLE file has no {requested_attribute} section: {path}")
-
-    field, grid_shape, layout = _field_from_sparse_unodes(unodes, sections[requested_attribute])
-    label_field = np.rint(np.asarray(field, dtype=np.float64)).astype(np.int32)
-    unique_labels = sorted(int(label) for label in np.unique(label_field))
-    label_to_index = {label: index for index, label in enumerate(unique_labels)}
-    compact = np.vectorize(label_to_index.get, otypes=[np.int32])(label_field)
-    id_lookup = layout["id_lookup"]
-    ordered_unodes = sorted((int(unode_id), float(x_coord), float(y_coord)) for unode_id, x_coord, y_coord in unodes)
-    unode_field_values: dict[str, tuple[float, ...]] = {}
-    field_order: list[str] = []
-    for section_name in sections:
-        if not section_name.startswith("U_"):
-            continue
-        if section_name == "UNODES":
-            continue
-        try:
-            default_value, sparse_values = _parse_sparse_values(sections[section_name])
-        except Exception:
-            continue
-        unode_field_values[section_name] = tuple(
-            float(sparse_values.get(int(unode_id), default_value))
-            for unode_id, _, _ in ordered_unodes
-        )
-        field_order.append(section_name)
+    seed = load_faithful_seed(elle_path, attribute=attribute)
     return {
-        "path": str(path),
-        "attribute": requested_attribute,
-        "label_field": compact,
-        "source_labels": unique_labels,
-        "grid_shape": tuple(int(value) for value in grid_shape),
-        "num_labels": int(len(unique_labels)),
-        "unode_ids": tuple(int(unode_id) for unode_id, _, _ in ordered_unodes),
-        "unode_positions": tuple((float(x_coord), float(y_coord)) for _, x_coord, y_coord in ordered_unodes),
-        "unode_grid_indices": tuple(
-            (
-                int(id_lookup[int(unode_id)][0]),
-                int(id_lookup[int(unode_id)][1]),
-            )
-            for unode_id, _, _ in ordered_unodes
-        ),
-        "unode_field_values": unode_field_values,
-        "unode_field_order": tuple(field_order),
+        "path": str(seed.path),
+        "attribute": str(seed.attribute),
+        "label_field": np.asarray(seed.label_field, dtype=np.int32),
+        "source_labels": tuple(int(value) for value in seed.source_labels),
+        "grid_shape": tuple(int(value) for value in seed.grid_shape),
+        "num_labels": int(seed.num_labels),
+        "unode_ids": tuple(int(value) for value in seed.unode_ids),
+        "unode_positions": tuple((float(x), float(y)) for x, y in seed.unode_positions),
+        "unode_grid_indices": tuple((int(i), int(j)) for i, j in seed.unode_grid_indices),
+        "unode_field_values": {
+            str(name): tuple(float(value) for value in values)
+            for name, values in seed.unode_field_values.items()
+        },
+        "unode_field_order": tuple(str(name) for name in seed.unode_field_order),
     }
 
 

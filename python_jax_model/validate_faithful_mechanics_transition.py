@@ -21,6 +21,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-before", type=Path, required=True, help="Legacy before-state ELLE file")
     parser.add_argument("--reference-after", type=Path, required=True, help="Legacy after-state ELLE file")
     parser.add_argument("--init-elle-attribute", default="auto")
+    parser.add_argument(
+        "--mechanics-density-update-mode",
+        choices=("increment", "overwrite"),
+        default="increment",
+        help="Choose whether tex.out DD values increment the current U_DISLOCDEN field or overwrite it, mirroring different legacy fft2elle branches",
+    )
+    parser.add_argument(
+        "--mechanics-host-repair-mode",
+        choices=("fs_check_unodes", "check_error"),
+        default="fs_check_unodes",
+        help="Choose whether post-import host repair follows the later FS_CheckUnodes path or the older check_error path",
+    )
     parser.add_argument("--label-attribute", default="auto")
     parser.add_argument(
         "--checkpoint-name",
@@ -50,6 +62,8 @@ def main() -> None:
         args.reference_after,
         outdir=args.outdir,
         init_elle_attribute=str(args.init_elle_attribute),
+        mechanics_density_update_mode=str(args.mechanics_density_update_mode),
+        mechanics_host_repair_mode=str(args.mechanics_host_repair_mode),
         label_attribute=str(args.label_attribute),
         checkpoint_name=args.checkpoint_name,
         field_names=args.field_names,

@@ -52,6 +52,23 @@ snapshot hashes are too coarse. It records:
 - mean/max absolute deltas
 - dense delta hashes for each tracked field
 
+For swept-unode fidelity work there is also a swept-site view in
+[legacy_reference.py](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/elle_jax_model/legacy_reference.py):
+
+- `extract_legacy_reference_swept_unode_transition(...)`
+- `compare_legacy_reference_swept_unode_transition(...)`
+
+That contract restricts comparison to unodes whose label ownership changed
+between the before/after states, which makes it useful for checking legacy
+Euler reassignment and density-reset behavior on swept sites.
+
+The shipped old-solver pair
+[fine_foam_step001.elle](/home/bz1229682991/research/Elle/TwoWayIceModel_Release/elle/example/results/fine_foam_step001.elle)
+to
+[fine_foam_step002.elle](/home/bz1229682991/research/Elle/TwoWayIceModel_Release/elle/example/results/fine_foam_step002.elle)
+now exercises both swept `U_EULER_3` and swept `U_DISLOCDEN` directly through
+that interface.
+
 The first committed reference in this folder is:
 
 - [fft_example_step0_reference.json](/home/bz1229682991/research/Elle/newcode/elle/python_jax_model/legacy_reference/testdata/fft_example_step0_reference.json)

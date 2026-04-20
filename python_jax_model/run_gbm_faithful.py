@@ -3,6 +3,7 @@ from __future__ import annotations
 """CLI for the faithful ELLE GBM translation path.
 
 This is the supported public entrypoint for solver-parity work.
+Prototype phase-field runners remain archive-only for fidelity decisions.
 """
 
 import argparse
@@ -131,8 +132,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--temperature-c",
         type=float,
-        default=FAITHFUL_GBM_DEFAULTS["temperature_c"],
-        help="ELLE temperature in Celsius used by the faithful Arrhenius boundary-mobility law",
+        default=None,
+        help="ELLE temperature in Celsius used by the faithful Arrhenius boundary-mobility law; defaults to the seed ELLE Temperature option",
     )
     parser.add_argument(
         "--phase-db",
@@ -143,6 +144,29 @@ def parse_args() -> argparse.Namespace:
         "--mechanics-snapshot-dir",
         type=Path,
         help="Optional directory containing one legacy FFT bridge snapshot or a sequence of snapshot subdirectories with temp-FFT.out, unodexyz.out, unodeang.out, and optional tex.out",
+    )
+    parser.add_argument(
+        "--no-mechanics-import-dd",
+        action="store_true",
+        help="Mirror FS_fft2elle ImportDDs=0 by skipping tex.out dislocation-density increments during the mechanics stage",
+    )
+    parser.add_argument(
+        "--mechanics-exclude-phase-id",
+        type=int,
+        default=FAITHFUL_GBM_DEFAULTS["mechanics_exclude_phase_id"],
+        help="Mirror FS_fft2elle ExcludePhaseID by zeroing imported DD in the selected phase during the mechanics stage",
+    )
+    parser.add_argument(
+        "--mechanics-density-update-mode",
+        choices=("increment", "overwrite"),
+        default=FAITHFUL_GBM_DEFAULTS["mechanics_density_update_mode"],
+        help="Choose whether tex.out DD values increment the current U_DISLOCDEN field or overwrite it, mirroring different legacy fft2elle branches",
+    )
+    parser.add_argument(
+        "--mechanics-host-repair-mode",
+        choices=("fs_check_unodes", "check_error"),
+        default=FAITHFUL_GBM_DEFAULTS["mechanics_host_repair_mode"],
+        help="Choose whether post-import host repair follows the later FS_CheckUnodes path or the older check_error path",
     )
     parser.add_argument(
         "--mechanics-only",
@@ -209,9 +233,13 @@ def main() -> None:
         recovery_trial_rotation_deg=float(args.recovery_trial_rotation_deg),
         recovery_rotation_mobility_length=float(args.recovery_rotation_mobility_length),
         raster_boundary_band=int(args.raster_boundary_band),
-        temperature_c=float(args.temperature_c),
+        temperature_c=None if args.temperature_c is None else float(args.temperature_c),
         phase_db_path=None if args.phase_db is None else str(args.phase_db),
         mechanics_snapshot_dir=None if args.mechanics_snapshot_dir is None else str(args.mechanics_snapshot_dir),
+        mechanics_import_dislocation_densities=not bool(args.no_mechanics_import_dd),
+        mechanics_exclude_phase_id=int(args.mechanics_exclude_phase_id),
+        mechanics_density_update_mode=str(args.mechanics_density_update_mode),
+        mechanics_host_repair_mode=str(args.mechanics_host_repair_mode),
         use_diagonal_trials=not bool(args.no_diagonal_trials),
         use_elle_physical_units=not bool(args.no_elle_physical_units),
     )
@@ -234,6 +262,10 @@ def main() -> None:
         f"raster_boundary_band={setup.mesh_feedback.boundary_width} "
         f"temperature_c={setup.mesh_feedback.relax_config.temperature_c} "
         f"mechanics_snapshots={len(setup.mechanics_snapshots)} "
+        f"mechanics_import_dd={int(setup.mechanics_import_options.import_dislocation_densities)} "
+        f"mechanics_exclude_phase_id={setup.mechanics_import_options.exclude_phase_id} "
+        f"mechanics_density_update_mode={setup.mechanics_import_options.density_update_mode} "
+        f"mechanics_host_repair_mode={setup.mechanics_import_options.host_repair_mode} "
         f"mechanics_only={int(bool(args.mechanics_only))} "
         "update_mode=mesh_only"
     )

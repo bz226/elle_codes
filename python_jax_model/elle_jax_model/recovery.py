@@ -282,6 +282,105 @@ def _read_shockley_recovery_energy_array(
     return np.asarray(energy, dtype=np.float64)
 
 
+def _legacy_recovery_site_response(
+    current_euler_deg: np.ndarray,
+    neighbour_euler_deg: np.ndarray,
+    config: RecoveryConfig,
+    *,
+    recovery_stage_index: int = 0,
+    previous_attr_f: float = 0.0,
+    current_density: float | None = None,
+    symmetry_operators: np.ndarray | None = None,
+) -> dict[str, Any]:
+    current_euler = np.asarray(current_euler_deg, dtype=np.float64).reshape(1, 3)
+    neighbours = np.asarray(neighbour_euler_deg, dtype=np.float64).reshape(-1, 3)
+    hagb_deg = float(config.high_angle_boundary_deg)
+    theta_deg = float(config.trial_rotation_deg)
+    if symmetry_operators is None:
+        symmetry_operators = _resolve_recovery_symmetry_operators(config)
+    symmetry_operators = np.asarray(symmetry_operators, dtype=np.float64)
+
+    if neighbours.size == 0:
+        final_density = None if current_density is None else float(current_density)
+        return {
+            "rotated": False,
+            "accepted_trials": [],
+            "trial_history": [],
+            "final_euler_deg": np.asarray(current_euler[0], dtype=np.float64),
+            "final_avg_misorientation_deg": 0.0,
+            "final_density": final_density,
+            "final_energy": 0.0,
+        }
+
+    def _average_capped_misorientation(site_euler_deg: np.ndarray) -> float:
+        site = np.repeat(np.asarray(site_euler_deg, dtype=np.float64).reshape(1, 3), neighbours.shape[0], axis=0)
+        misorientation = _symmetry_misorientation_deg(site, neighbours, symmetry_operators)
+        capped = np.minimum(np.asarray(misorientation, dtype=np.float64), hagb_deg)
+        return float(np.mean(capped)) if capped.size else 0.0
+
+    current_avg_misorientation = _average_capped_misorientation(current_euler[0])
+    min_energy = _read_shockley_recovery_energy(current_avg_misorientation, hagb_deg)
+    accepted_trials: list[int] = []
+    trial_history: list[dict[str, Any]] = []
+
+    for trial_index in range(6):
+        trial_euler = _apply_legacy_recovery_trial_rotation(
+            current_euler,
+            trial_index=int(trial_index),
+            theta_deg=theta_deg,
+        )[0]
+        trial_avg_misorientation = _average_capped_misorientation(trial_euler)
+        trial_energy = _read_shockley_recovery_energy(trial_avg_misorientation, hagb_deg)
+        rotation_deg = float(config.rotation_mobility_length) * ((min_energy - trial_energy) * theta_deg)
+        rotation_deg = float(
+            min(
+                rotation_deg,
+                float(_recovery_rotation_cap_deg(trial_avg_misorientation, theta_deg)),
+            )
+        )
+        accepted = bool(
+            trial_energy < min_energy
+            and trial_avg_misorientation < hagb_deg
+            and rotation_deg > 0.0
+        )
+        if accepted:
+            current_euler = _apply_legacy_recovery_trial_rotation(
+                current_euler,
+                trial_index=int(trial_index),
+                theta_deg=rotation_deg,
+            )
+            current_avg_misorientation = _average_capped_misorientation(current_euler[0])
+            min_energy = _read_shockley_recovery_energy(current_avg_misorientation, hagb_deg)
+            accepted_trials.append(int(trial_index))
+        trial_history.append(
+            {
+                "trial_index": int(trial_index),
+                "trial_avg_misorientation_deg": float(trial_avg_misorientation),
+                "trial_energy": float(trial_energy),
+                "accepted": accepted,
+                "applied_rotation_deg": float(rotation_deg if accepted else 0.0),
+                "min_energy_after_trial": float(min_energy),
+            }
+        )
+
+    final_density = None if current_density is None else float(current_density)
+    if final_density is not None and int(recovery_stage_index) > 0:
+        dummy = min(float(previous_attr_f), hagb_deg)
+        if dummy <= 1.0e-1:
+            dummy = 1.0e-1
+        final_density = float(abs(final_density * current_avg_misorientation / dummy))
+
+    return {
+        "rotated": bool(accepted_trials),
+        "accepted_trials": accepted_trials,
+        "trial_history": trial_history,
+        "final_euler_deg": np.asarray(current_euler[0], dtype=np.float64),
+        "final_avg_misorientation_deg": float(current_avg_misorientation),
+        "final_density": final_density,
+        "final_energy": float(min_energy),
+    }
+
+
 def _recovery_rotation_cap_deg(
     avg_local_misorientation_deg: np.ndarray | float,
     theta_deg: float,
@@ -663,7 +762,7 @@ def apply_recovery_stage(
             rotation_all = np.minimum(
                 rotation_all,
                 _recovery_rotation_cap_deg(
-                    baseline_all,
+                    trial_misori_all,
                     float(config.trial_rotation_deg),
                 ),
             )

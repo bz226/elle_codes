@@ -190,6 +190,19 @@ def boundary_segment_mobility(
     return float(mobility)
 
 
+def boundary_segment_energy(
+    db: FaithfulMobilityDB,
+    phase_a: int,
+    phase_b: int,
+    *,
+    default_energy: float = 1.0,
+) -> float:
+    prop = get_phase_boundary_property(db, phase_a, phase_b)
+    if prop is None:
+        return float(default_energy)
+    return float(prop.boundary_energy)
+
+
 def caxis_from_euler3(alpha: float, beta: float, gamma: float) -> tuple[float, float, float]:
     alpha_rad = math.radians(float(alpha))
     beta_rad = math.radians(float(beta))

@@ -734,8 +734,13 @@ def apply_nucleation_stage(
     pre_rebuild_connectivity_merged_components = 0
 
     field_values = {} if seed_fields is None else dict(seed_fields.get("values", {}))
+    seed_sections = mesh_state.get("_runtime_seed_unode_sections")
+    section_field_names: set[str] = set()
+    if isinstance(seed_sections, dict):
+        section_field_names.update(str(name) for name in seed_sections.get("field_order", ()))
+        section_field_names.update(str(name) for name in dict(seed_sections.get("values", {})))
     critical_score_grid = None
-    use_single_critical_seed = "U_DISLOCDEN" in field_values
+    use_single_critical_seed = "U_DISLOCDEN" in section_field_names
     attr_f_values = field_values.get("U_ATTRIB_F")
     if attr_f_values is not None:
         critical_score_grid = _build_grid_section(
@@ -863,7 +868,14 @@ def apply_nucleation_stage(
                 int(np.ceil(float(config.max_mesh_rebuild_growth_factor) * max(baseline_flynn_count, 1))),
                 max(len(extended_source_labels) * 2, 1),
             )
-            if rebuilt_flynn_count > max_allowed_flynns:
+            max_allowed_fragmented_rebuild = int(
+                parent_flynn_count + max(int(new_labels_added) * 2, 4)
+            )
+            rebuild_requires_cleanup = (
+                rebuilt_flynn_count > max_allowed_flynns
+                or rebuilt_flynn_count > max_allowed_fragmented_rebuild
+            )
+            if rebuild_requires_cleanup:
                 cleaned_labels, cleanup_stats = _enforce_connected_label_ownership(
                     updated_labels,
                     reference_labels=current_np,
@@ -875,7 +887,10 @@ def apply_nucleation_stage(
                     extended_source_labels,
                 )
                 retried_flynn_count = int(len(retried_mesh_state.get("flynns", ())))
-                if retried_flynn_count <= max_allowed_flynns:
+                if (
+                    retried_flynn_count <= max_allowed_flynns
+                    and retried_flynn_count <= max_allowed_fragmented_rebuild
+                ):
                     updated_labels = np.asarray(cleaned_labels, dtype=np.int32)
                     if label_attribute and label_attribute in field_values:
                         field_values[label_attribute] = _label_attribute_values_from_labels(
@@ -905,6 +920,9 @@ def apply_nucleation_stage(
                         cleanup_stats.get("connectivity_merged_components", 0)
                     )
                     updated_mesh_state["stats"]["nucleation_mesh_rebuild_retried"] = 1
+                    updated_mesh_state["stats"]["nucleation_rebuild_fragmentation_guard_triggered"] = int(
+                        rebuilt_flynn_count > max_allowed_fragmented_rebuild
+                    )
                 else:
                     fallback_labels = np.asarray(cleaned_labels, dtype=np.int32)
                     label_overrides = np.full(current_np.shape, -1, dtype=np.int32)
@@ -935,6 +953,9 @@ def apply_nucleation_stage(
                         retried_flynn_count
                     )
                     updated_mesh_state["stats"]["nucleation_rebuild_max_allowed_flynns"] = int(max_allowed_flynns)
+                    updated_mesh_state["stats"]["nucleation_rebuild_max_allowed_fragmented_flynns"] = int(
+                        max_allowed_fragmented_rebuild
+                    )
                     updated_mesh_state["stats"]["nucleation_rebuild_baseline_flynns"] = int(baseline_flynn_count)
                     updated_mesh_state["stats"]["nucleation_pre_rebuild_connectivity_reassigned_unodes"] = int(
                         cleanup_stats.get("connectivity_reassigned_unodes", 0)
@@ -944,7 +965,11 @@ def apply_nucleation_stage(
                     )
                     updated_mesh_state["stats"]["nucleation_mesh_rebuild_retried"] = 1
                     updated_mesh_state["stats"]["export_dense_unodes"] = 1
-            if rebuilt_flynn_count <= max_allowed_flynns and updated_mesh_state is mesh_state:
+            if (
+                rebuilt_flynn_count <= max_allowed_flynns
+                and rebuilt_flynn_count <= max_allowed_fragmented_rebuild
+                and updated_mesh_state is mesh_state
+            ):
                 updated_mesh_state = rebuilt_mesh_state
                 updated_mesh_state.pop("_runtime_fallback_override_labels", None)
                 updated_mesh_state["_runtime_seed_unode_fields"] = {
@@ -967,7 +992,13 @@ def apply_nucleation_stage(
                 int(np.ceil(float(config.max_mesh_rebuild_growth_factor) * max(baseline_flynn_count, 1))),
                 max(int(np.max(updated_labels)) + 1, 1) * 2,
             )
-            if rebuilt_flynn_count > max_allowed_flynns:
+            max_allowed_fragmented_rebuild = int(
+                parent_flynn_count + max(int(new_labels_added) * 2, 4)
+            )
+            if (
+                rebuilt_flynn_count > max_allowed_flynns
+                or rebuilt_flynn_count > max_allowed_fragmented_rebuild
+            ):
                 cleaned_labels, cleanup_stats = _enforce_connected_label_ownership(
                     updated_labels,
                     reference_labels=current_np,
@@ -979,7 +1010,10 @@ def apply_nucleation_stage(
                     tuple(range(int(np.max(cleaned_labels)) + 1)),
                 )
                 retried_flynn_count = int(len(retried_mesh_state.get("flynns", ())))
-                if retried_flynn_count <= max_allowed_flynns:
+                if (
+                    retried_flynn_count <= max_allowed_flynns
+                    and retried_flynn_count <= max_allowed_fragmented_rebuild
+                ):
                     updated_labels = np.asarray(cleaned_labels, dtype=np.int32)
                     rebuilt_mesh_state = retried_mesh_state
                     rebuilt_flynn_count = retried_flynn_count
@@ -1016,6 +1050,9 @@ def apply_nucleation_stage(
                         retried_flynn_count
                     )
                     updated_mesh_state["stats"]["nucleation_rebuild_max_allowed_flynns"] = int(max_allowed_flynns)
+                    updated_mesh_state["stats"]["nucleation_rebuild_max_allowed_fragmented_flynns"] = int(
+                        max_allowed_fragmented_rebuild
+                    )
                     updated_mesh_state["stats"]["nucleation_rebuild_baseline_flynns"] = int(baseline_flynn_count)
                     updated_mesh_state["stats"]["nucleation_pre_rebuild_connectivity_reassigned_unodes"] = int(
                         cleanup_stats.get("connectivity_reassigned_unodes", 0)
